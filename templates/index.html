@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='css/style.css') }}"
+    >
+
+    <title>
+        Tesorería de la Iglesia Católica de Los Arrayanes
+    </title>
+</head>
+
+<body>
+
+    <!-- =====================================================
+         ENCABEZADO
+    ====================================================== -->
+
+    <header class="topbar">
+
+        <div class="brand">
+
+            <div class="brand-symbol">
+                ✝
+            </div>
+
+            <div class="brand-text">
+
+                <h1>
+                    Tesorería de la Iglesia Católica de Los Arrayanes
+                </h1>
+
+                <p>
+                    Registro y consulta de ingresos y gastos
+                </p>
+
+            </div>
+
+        </div>
+
+        <div class="header-actions">
+
+            <span
+                id="adminStatus"
+                class="admin-status hidden"
+            >
+                Administrador
+            </span>
+
+            <button
+                id="loginBtn"
+                class="btn btn-primary"
+                type="button"
+            >
+                🔐 Iniciar sesión
+            </button>
+
+            <button
+                id="logoutBtn"
+                class="btn btn-secondary hidden"
+                type="button"
+            >
+                Cerrar sesión
+            </button>
+
+        </div>
+
+    </header>
+
+
+    <!-- =====================================================
+         CONTENIDO PRINCIPAL
+    ====================================================== -->
+
+    <main class="container">
+
+        <!-- INTRODUCCIÓN -->
+
+        <section class="welcome">
+
+            <div>
+
+                <span class="section-label">
+                    TESORERÍA
+                </span>
+
+                <h2>
+                    Estado financiero
+                </h2>
+
+                <p>
+                    Consulta de manera sencilla los ingresos,
+                    gastos y movimientos registrados de la iglesia.
+                </p>
+
+            </div>
+
+        </section>
+
+
+        <!-- =================================================
+             RESUMEN
+        ================================================== -->
+
+        <section class="summary-grid">
+
+            <article class="summary-card balance-card">
+
+                <div class="summary-icon">
+                    💰
+                </div>
+
+                <div>
+
+                    <span>
+                        Saldo actual
+                    </span>
+
+                    <strong id="saldo">
+                        L 0.00
+                    </strong>
+
+                </div>
+
+            </article>
+
+
+            <article class="summary-card income-card">
+
+                <div class="summary-icon">
+                    ↗
+                </div>
+
+                <div>
+
+                    <span>
+                        Total de ingresos desde el primer registro
+                    </span>
+
+                    <strong id="ingresos">
+                        L 0.00
+                    </strong>
+
+                </div>
+
+            </article>
+
+
+            <article class="summary-card expense-card">
+
+                <div class="summary-icon">
+                    ↘
+                </div>
+
+                <div>
+
+                    <span>
+                        Total de gastos
+                    </span>
+
+                    <strong id="gastos">
+                        L 0.00
+                    </strong>
+
+                </div>
+
+            </article>
+
+        </section>
+
+
+        <!-- =================================================
+             MOVIMIENTOS
+        ================================================== -->
+
+        <section class="panel">
+
+            <div class="panel-header">
+
+                <div>
+
+                    <span class="section-label">
+                        HISTORIAL
+                    </span>
+
+                    <h2>
+                        Movimientos
+                    </h2>
+
+                    <p>
+                        Consulta los registros de la tesorería.
+                    </p>
+
+                </div>
+
+                <button
+                    id="showAllBtn"
+                    class="btn btn-secondary"
+                    type="button"
+                >
+                    Mostrar todo
+                </button>
+
+            </div>
+
+
+            <!-- FILTROS -->
+
+            <div class="filters">
+
+                <div class="filter-group search-filter">
+
+                    <label for="search">
+                        Buscar
+                    </label>
+
+                    <input
+                        id="search"
+                        type="search"
+                        placeholder="Descripción..."
+                    >
+
+                </div>
+
+
+                <div class="filter-group">
+
+                    <label for="from">
+                        Desde
+                    </label>
+
+                    <input
+                        id="from"
+                        type="date"
+                    >
+
+                </div>
+
+
+                <div class="filter-group">
+
+                    <label for="to">
+                        Hasta
+                    </label>
+
+                    <input
+                        id="to"
+                        type="date"
+                    >
+
+                </div>
+
+
+                <div class="filter-group">
+
+                    <label for="filterType">
+                        Tipo
+                    </label>
+
+                    <select id="filterType">
+
+                        <option value="">
+                            Todos
+                        </option>
+
+                        <option value="ingreso">
+                            Ingresos
+                        </option>
+
+                        <option value="gasto">
+                            Gastos
+                        </option>
+
+                    </select>
+
+                </div>
+
+
+                <div class="filter-group">
+
+                    <label for="filterCategory">
+                        Categoría
+                    </label>
+
+                    <select id="filterCategory">
+
+                        <option value="">
+                            Todas
+                        </option>
+
+                        <option value="Ofrendas dominicales">
+                            Ofrendas dominicales
+                        </option>
+
+                        <option value="Donaciones">
+                            Donaciones
+                        </option>
+
+                        <option value="Servicios">
+                            Servicios
+                        </option>
+
+                        <option value="Mantenimiento">
+                            Mantenimiento
+                        </option>
+
+                        <option value="Alimentación">
+                            Alimentación
+                        </option>
+
+                        <option value="Actividades de la iglesia">
+                            Actividades de la iglesia
+                        </option>
+
+                        <option value="Compras">
+                            Compras
+                        </option>
+
+                        <option value="Transporte">
+                            Transporte
+                        </option>
+
+                        <option value="Otros">
+                            Otros
+                        </option>
+
+                    </select>
+
+                </div>
+
+
+                <button
+                    id="filterBtn"
+                    class="btn btn-primary filter-button"
+                    type="button"
+                >
+                    🔎 Buscar
+                </button>
+
+            </div>
+
+
+            <!-- TABLA -->
+
+            <div class="table-container">
+
+                <table>
+
+                    <thead>
+
+                        <tr>
+
+                            <th>
+                                Fecha
+                            </th>
+
+                            <th>
+                                Descripción
+                            </th>
+
+                            <th>
+                                Categoría
+                            </th>
+
+                            <th>
+                                Tipo
+                            </th>
+
+                            <th>
+                                Monto
+                            </th>
+
+                            <th
+                                id="actionsHeader"
+                                class="admin-column hidden"
+                            >
+                                Acciones
+                            </th>
+
+                        </tr>
+
+                    </thead>
+
+                    <tbody id="movementTable">
+                    </tbody>
+
+                </table>
+
+            </div>
+
+
+            <!-- ESTADO VACÍO -->
+
+            <div
+                id="emptyState"
+                class="empty-state hidden"
+            >
+
+                <div class="empty-icon">
+                    📭
+                </div>
+
+                <h3>
+                    No hay movimientos
+                </h3>
+
+                <p>
+                    No encontramos registros que coincidan
+                    con los filtros seleccionados.
+                </p>
+
+            </div>
+
+        </section>
+
+
+        <!-- =================================================
+             PANEL ADMINISTRACIÓN
+        ================================================== -->
+
+        <section
+            id="adminPanel"
+            class="panel admin-panel hidden"
+        >
+
+            <div class="panel-header">
+
+                <div>
+
+                    <span class="section-label">
+                        ADMINISTRACIÓN
+                    </span>
+
+                    <h2>
+                        Registrar movimiento
+                    </h2>
+
+                    <p>
+                        Desde aquí puedes registrar ingresos
+                        y gastos de la tesorería.
+                    </p>
+
+                </div>
+
+            </div>
+
+
+            <!-- FORMULARIO -->
+
+            <form
+                id="movementForm"
+                class="movement-form"
+            >
+
+                <input
+                    type="hidden"
+                    id="editId"
+                >
+
+
+                <!-- TIPO -->
+
+                <div class="form-group">
+
+                    <label for="type">
+                        Tipo de movimiento
+                    </label>
+
+                    <select
+                        id="type"
+                        required
+                    >
+
+                        <option value="ingreso">
+                            Ingreso
+                        </option>
+
+                        <option value="gasto">
+                            Gasto
+                        </option>
+
+                    </select>
+
+                </div>
+
+
+                <!-- MONTO -->
+
+                <div class="form-group">
+
+                    <label for="amount">
+                        Monto
+                    </label>
+
+                    <div class="money-input">
+
+                        <span>
+                            L
+                        </span>
+
+                        <input
+                            id="amount"
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            placeholder="0.00"
+                            required
+                        >
+
+                    </div>
+
+                </div>
+
+
+                <!-- FECHA -->
+
+                <div class="form-group">
+
+                    <label for="date">
+                        Fecha
+                    </label>
+
+                    <input
+                        id="date"
+                        type="date"
+                        required
+                    >
+
+                </div>
+
+
+                <!-- CATEGORÍA -->
+
+                <div class="form-group">
+
+                    <label for="category">
+                        Categoría
+                    </label>
+
+                    <select
+                        id="category"
+                        required
+                    >
+
+                        <option value="Ofrendas dominicales">
+                            Ofrendas dominicales
+                        </option>
+
+                        <option value="Donaciones">
+                            Donaciones
+                        </option>
+
+                        <option value="Servicios">
+                            Servicios
+                        </option>
+
+                        <option value="Mantenimiento">
+                            Mantenimiento
+                        </option>
+
+                        <option value="Alimentación">
+                            Alimentación
+                        </option>
+
+                        <option value="Actividades de la iglesia">
+                            Actividades de la iglesia
+                        </option>
+
+                        <option value="Compras">
+                            Compras
+                        </option>
+
+                        <option value="Transporte">
+                            Transporte
+                        </option>
+
+                        <option value="Otros">
+                            Otros
+                        </option>
+
+                    </select>
+
+                </div>
+
+
+                <!-- DESCRIPCIÓN -->
+
+                <div class="form-group wide">
+
+                    <label for="description">
+                        Descripción breve
+                    </label>
+
+                    <input
+                        id="description"
+                        type="text"
+                        maxlength="180"
+                        placeholder="Ej. Ofrenda del domingo"
+                        required
+                    >
+
+                </div>
+
+
+                <!-- OTROS -->
+
+                <div
+                    id="otherWrap"
+                    class="form-group wide hidden"
+                >
+
+                    <label for="otherDetail">
+                        Especifique
+                    </label>
+
+                    <input
+                        id="otherDetail"
+                        type="text"
+                        maxlength="180"
+                        placeholder="Especifique el concepto"
+                    >
+
+                </div>
+
+
+                <!-- BOTONES -->
+
+                <div class="form-actions">
+
+                    <button
+                        id="saveBtn"
+                        class="btn btn-primary"
+                        type="submit"
+                    >
+                        💾 Guardar movimiento
+                    </button>
+
+                    <button
+                        id="cancelEditBtn"
+                        class="btn btn-secondary hidden"
+                        type="button"
+                    >
+                        Cancelar edición
+                    </button>
+
+                </div>
+
+            </form>
+
+
+            <div class="admin-divider"></div>
+
+
+            <!-- =================================================
+                 HISTORIAL ADMINISTRATIVO
+            ================================================== -->
+
+            <div
+                id="adminHistorySection"
+                class="admin-history-section"
+            >
+
+                <div class="panel-header admin-history-header">
+
+                    <div>
+
+                        <span class="section-label">
+                            CONTROL ADMINISTRATIVO
+                        </span>
+
+                        <h2>
+                            🗂️ Historial administrativo
+                        </h2>
+
+                        <p>
+                            Aquí se conservan los movimientos que
+                            fueron eliminados. Puedes restaurarlos
+                            cuando sea necesario.
+                        </p>
+
+                    </div>
+
+                    <button
+                        id="refreshHistoryBtn"
+                        class="btn btn-secondary"
+                        type="button"
+                    >
+                        🔄 Actualizar
+                    </button>
+
+                </div>
+
+
+                <!-- INFORMACIÓN -->
+
+                <div class="admin-history-info">
+
+                    <div class="history-info-icon">
+                        🛡️
+                    </div>
+
+                    <div>
+
+                        <strong>
+                            Historial protegido
+                        </strong>
+
+                        <p>
+                            Los movimientos eliminados no se borran
+                            físicamente. Permanecen registrados para
+                            mantener la trazabilidad administrativa.
+                        </p>
+
+                    </div>
+
+                </div>
+
+
+                <!-- TABLA HISTORIAL -->
+
+                <div class="table-container admin-history-table">
+
+                    <table>
+
+                        <thead>
+
+                            <tr>
+
+                                <th>
+                                    Fecha original
+                                </th>
+
+                                <th>
+                                    Descripción
+                                </th>
+
+                                <th>
+                                    Categoría
+                                </th>
+
+                                <th>
+                                    Tipo
+                                </th>
+
+                                <th>
+                                    Monto
+                                </th>
+
+                                <th>
+                                    Eliminado
+                                </th>
+
+                                <th>
+                                    Acción
+                                </th>
+
+                            </tr>
+
+                        </thead>
+
+                        <tbody id="deletedMovementTable">
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+
+                <!-- ESTADO VACÍO -->
+
+                <div
+                    id="emptyDeletedState"
+                    class="empty-state hidden"
+                >
+
+                    <div class="empty-icon">
+                        🗃️
+                    </div>
+
+                    <h3>
+                        No hay movimientos eliminados
+                    </h3>
+
+                    <p>
+                        Los movimientos eliminados aparecerán
+                        aquí para poder consultarlos y restaurarlos.
+                    </p>
+
+                </div>
+
+            </div>
+
+        </section>
+
+    </main>
+
+
+    <!-- =====================================================
+         MODAL LOGIN
+    ====================================================== -->
+
+    <div
+        id="loginModal"
+        class="modal hidden"
+    >
+
+        <div class="modal-card">
+
+            <button
+                id="closeModal"
+                class="modal-close"
+                type="button"
+                aria-label="Cerrar"
+            >
+                ×
+            </button>
+
+            <div class="login-icon">
+                🔐
+            </div>
+
+            <h2>
+                Acceso administrativo
+            </h2>
+
+            <p>
+                Ingresa la contraseña para administrar
+                los movimientos de la tesorería.
+            </p>
+
+            <form id="loginForm">
+
+                <div class="form-group">
+
+                    <label for="password">
+                        Contraseña
+                    </label>
+
+                    <input
+                        id="password"
+                        type="password"
+                        autocomplete="current-password"
+                        placeholder="Contraseña"
+                        required
+                    >
+
+                </div>
+
+                <div
+                    id="loginError"
+                    class="error-message"
+                ></div>
+
+                <button
+                    class="btn btn-primary full-width"
+                    type="submit"
+                >
+                    Iniciar sesión
+                </button>
+
+            </form>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         MODAL ELIMINAR
+    ====================================================== -->
+
+    <div
+        id="deleteModal"
+        class="modal hidden"
+    >
+
+        <div class="modal-card confirmation-card">
+
+            <div class="warning-icon">
+                ⚠️
+            </div>
+
+            <h2>
+                ¿Eliminar movimiento?
+            </h2>
+
+            <p>
+                El movimiento no será borrado físicamente.
+                Quedará guardado en el historial administrativo
+                como eliminado y dejará de afectar el saldo.
+            </p>
+
+            <div class="confirmation-actions">
+
+                <button
+                    id="cancelDeleteBtn"
+                    class="btn btn-secondary"
+                    type="button"
+                >
+                    Cancelar
+                </button>
+
+                <button
+                    id="confirmDeleteBtn"
+                    class="btn btn-danger"
+                    type="button"
+                >
+                    Sí, eliminar
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         MODAL RESTAURAR
+    ====================================================== -->
+
+    <div
+        id="restoreModal"
+        class="modal hidden"
+    >
+
+        <div class="modal-card confirmation-card">
+
+            <div class="restore-icon">
+                ♻️
+            </div>
+
+            <h2>
+                ¿Restaurar movimiento?
+            </h2>
+
+            <p>
+                El movimiento volverá a aparecer en el historial
+                principal y volverá a afectar el saldo de la
+                tesorería.
+            </p>
+
+            <div class="confirmation-actions">
+
+                <button
+                    id="cancelRestoreBtn"
+                    class="btn btn-secondary"
+                    type="button"
+                >
+                    Cancelar
+                </button>
+
+                <button
+                    id="confirmRestoreBtn"
+                    class="btn btn-primary"
+                    type="button"
+                >
+                    Sí, restaurar
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         MODAL ELIMINACIÓN DEFINITIVA
+         
+         ESTE ERA EL ELEMENTO QUE FALTABA
+    ====================================================== -->
+
+    <div
+        id="permanentDeleteModal"
+        class="modal hidden"
+    >
+
+        <div class="modal-card confirmation-card">
+
+            <div class="warning-icon">
+                ⚠️
+            </div>
+
+            <h2>
+                ¿Eliminar definitivamente?
+            </h2>
+
+            <p>
+                Esta acción eliminará permanentemente el movimiento
+                del historial administrativo. Después de confirmar,
+                ya no podrá ser restaurado.
+            </p>
+
+            <div class="confirmation-actions">
+
+                <button
+                    id="cancelPermanentDeleteBtn"
+                    class="btn btn-secondary"
+                    type="button"
+                >
+                    Cancelar
+                </button>
+
+                <button
+                    id="confirmPermanentDeleteBtn"
+                    class="btn btn-danger"
+                    type="button"
+                >
+                    Sí, eliminar definitivamente
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         NOTIFICACIONES
+    ====================================================== -->
+
+    <div
+        id="toast"
+        class="toast"
+        role="status"
+        aria-live="polite"
+    ></div>
+
+
+    <!-- =====================================================
+         JAVASCRIPT
+    ====================================================== -->
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+
+</body>
+</html>
