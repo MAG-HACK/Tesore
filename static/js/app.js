@@ -77,15 +77,10 @@ function showToast(message, type = "success") {
     }, 3500);
 }
 
-/*
- * Convierte los valores del frontend al formato que utiliza
- * el backend:
- *
- * ingreso -> income
- * gasto   -> expense
- *
- * También acepta que eventualmente llegue "income"/"expense".
- */
+/* ============================================================
+   NORMALIZACIÓN DE TIPOS
+   ============================================================ */
+
 function normalizeTypeForBackend(value) {
     const type = String(value || "").trim().toLowerCase();
 
@@ -106,10 +101,6 @@ function normalizeTypeForBackend(value) {
     return type;
 }
 
-/*
- * Convierte los valores que devuelve el backend al formato
- * visual utilizado por la aplicación.
- */
 function normalizeTypeForFrontend(value) {
     const type = String(value || "").trim().toLowerCase();
 
@@ -143,6 +134,10 @@ function getTypeLabel(value) {
 
     return escapeHtml(value || "");
 }
+
+/* ============================================================
+   PETICIONES API
+   ============================================================ */
 
 async function apiRequest(url, options = {}) {
     const finalOptions = {
@@ -410,7 +405,7 @@ async function logout() {
 }
 
 /* ============================================================
-   RESUMEN
+   RESUMEN / SALDO
    ============================================================ */
 
 async function loadSummary() {
@@ -419,20 +414,49 @@ async function loadSummary() {
             "/api/summary"
         );
 
+        /*
+         * IMPORTANTE:
+         *
+         * Flask devuelve:
+         *
+         * data.balance
+         * data.income
+         * data.expenses
+         *
+         * NO:
+         *
+         * data.saldo
+         * data.ingresos
+         * data.gastos
+         */
+
+        const balance = Number(data.balance || 0);
+        const income = Number(data.income || 0);
+        const expenses = Number(data.expenses || 0);
+
         if ($("saldo")) {
             $("saldo").textContent =
-                `L ${formatMoney(data.saldo)}`;
+                `L ${formatMoney(balance)}`;
         }
 
         if ($("ingresos")) {
             $("ingresos").textContent =
-                `L ${formatMoney(data.ingresos)}`;
+                `L ${formatMoney(income)}`;
         }
 
         if ($("gastos")) {
             $("gastos").textContent =
-                `L ${formatMoney(data.gastos)}`;
+                `L ${formatMoney(expenses)}`;
         }
+
+        console.log(
+            "Resumen actualizado:",
+            {
+                saldo: balance,
+                ingresos: income,
+                gastos: expenses
+            }
+        );
     } catch (error) {
         console.error(
             "Error cargando resumen:",
@@ -679,6 +703,7 @@ function renderMovements(movements) {
                     ? `
                     <td class="admin-column">
                         <div class="movement-actions">
+
                             <button
                                 type="button"
                                 class="btn btn-secondary btn-small"
@@ -696,6 +721,7 @@ function renderMovements(movements) {
                             >
                                 🗑️ Eliminar
                             </button>
+
                         </div>
                     </td>
                     `
@@ -908,6 +934,10 @@ function cancelEdit() {
     setDefaultDate();
 }
 
+/* ============================================================
+   GUARDAR / ACTUALIZAR MOVIMIENTO
+   ============================================================ */
+
 async function handleMovementSubmit(event) {
     event.preventDefault();
 
@@ -942,16 +972,6 @@ async function handleMovementSubmit(event) {
         return;
     }
 
-    /*
-     * IMPORTANTE:
-     * Aquí hacemos la conversión:
-     *
-     * ingreso -> income
-     * gasto   -> expense
-     *
-     * El backend Flask recibe ahora exactamente
-     * los valores que espera.
-     */
     const data = {
         type: normalizeTypeForBackend(
             type.value
@@ -1010,6 +1030,11 @@ async function handleMovementSubmit(event) {
         showingAll = false;
         currentPage = 0;
 
+        /*
+         * IMPORTANTE:
+         * Primero recargamos movimientos y
+         * después el resumen.
+         */
         await loadMovements();
         await loadSummary();
 
@@ -1022,14 +1047,6 @@ async function handleMovementSubmit(event) {
             error
         );
 
-        /*
-         * Mostramos directamente el mensaje que
-         * devuelve Flask, por ejemplo:
-         *
-         * "El tipo debe ser income o expense."
-         * "El monto es obligatorio."
-         * etc.
-         */
         showToast(
             error.message ||
                 "No se pudo guardar el movimiento.",
@@ -1174,7 +1191,6 @@ async function confirmDelete() {
 
     if (button) {
         button.disabled = true;
-
         button.textContent =
             "Eliminando...";
     }
@@ -1213,7 +1229,6 @@ async function confirmDelete() {
     } finally {
         if (button) {
             button.disabled = false;
-
             button.textContent =
                 "Sí, eliminar";
         }
@@ -1242,10 +1257,6 @@ function createDeletedHistoryUI() {
         return;
     }
 
-    /*
-     * El HTML principal puede tener ya el panel.
-     * Si existe, no creamos otro.
-     */
     const existingSection =
         $("adminHistorySection");
 
@@ -1727,6 +1738,7 @@ function formatDeletedDate(value) {
 
 function toggleShowAll() {
     showingAll = !showingAll;
+
     currentPage = 0;
 
     loadMovements();
@@ -1931,6 +1943,7 @@ function setupEvents() {
                     "Enter"
                 ) {
                     event.preventDefault();
+
                     applyFilters();
                 }
             }
@@ -1963,7 +1976,6 @@ document.addEventListener(
         setupEvents();
 
         setDefaultDate();
-
         updateOtherField();
 
         await checkAuth();
