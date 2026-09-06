@@ -8,11 +8,11 @@ from flask import Flask, jsonify, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
-app = Flask(__name__)
+# ============================================================
+# CONFIGURACIÓN DE FLASK
+# ============================================================
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
+app = Flask(__name__)
 
 app.secret_key = os.environ.get(
     "FLASK_SECRET_KEY",
@@ -23,30 +23,39 @@ app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
-# En Render usamos HTTPS.
 if os.environ.get("RENDER") == "true":
     app.config["SESSION_COOKIE_SECURE"] = True
 
+
+# ============================================================
+# VARIABLES DE ENTORNO
+# ============================================================
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+ADMIN_USERNAME = os.environ.get(
+    "ADMIN_USERNAME",
+    "admin"
+)
+
+ADMIN_PASSWORD = os.environ.get(
+    "ADMIN_PASSWORD",
+    "admin123"
+)
 
 
 # ============================================================
-# CONEXIÓN A SUPABASE
+# CONEXIÓN A SUPABASE / POSTGRESQL
 # ============================================================
 
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError(
-            "DATABASE_URL no está configurada. "
-            "Agrega la variable DATABASE_URL en Render."
+            "DATABASE_URL no está configurada."
         )
 
     database_url = DATABASE_URL
 
-    # Supabase requiere conexión SSL.
     if "sslmode=" not in database_url:
         separator = "&" if "?" in database_url else "?"
         database_url += f"{separator}sslmode=require"
@@ -85,7 +94,11 @@ def movement_to_dict(row):
     if isinstance(result.get("amount"), Decimal):
         result["amount"] = float(result["amount"])
 
-    for field in ["created_at", "updated_at", "deleted_at"]:
+    for field in [
+        "created_at",
+        "updated_at",
+        "deleted_at"
+    ]:
         if result.get(field) is not None:
             result[field] = result[field].isoformat()
 
@@ -108,14 +121,32 @@ def validate_movement_data(data):
     if not data:
         return "No se recibieron datos."
 
-    movement_type = str(data.get("type", "")).strip().lower()
-    amount_value = data.get("amount")
-    description = str(data.get("description", "")).strip()
-    date_value = str(data.get("date", "")).strip()
-    category = str(data.get("category", "")).strip()
-    other_detail = str(data.get("other_detail", "")).strip()
+    movement_type = str(
+        data.get("type", "")
+    ).strip().lower()
 
-    if movement_type not in ["income", "expense"]:
+    amount_value = data.get("amount")
+
+    description = str(
+        data.get("description", "")
+    ).strip()
+
+    date_value = str(
+        data.get("date", "")
+    ).strip()
+
+    category = str(
+        data.get("category", "")
+    ).strip()
+
+    other_detail = str(
+        data.get("other_detail", "")
+    ).strip()
+
+    if movement_type not in [
+        "income",
+        "expense"
+    ]:
         return "El tipo debe ser income o expense."
 
     if amount_value is None or str(amount_value).strip() == "":
@@ -136,7 +167,10 @@ def validate_movement_data(data):
         return "La fecha es obligatoria."
 
     try:
-        datetime.strptime(date_value, "%Y-%m-%d")
+        datetime.strptime(
+            date_value,
+            "%Y-%m-%d"
+        )
     except ValueError:
         return "La fecha debe tener el formato YYYY-MM-DD."
 
@@ -150,7 +184,7 @@ def validate_movement_data(data):
 
 
 # ============================================================
-# CREACIÓN / VERIFICACIÓN DE TABLAS
+# CREAR / VERIFICAR TABLAS Y ADMINISTRADOR
 # ============================================================
 
 def init_database():
@@ -158,6 +192,10 @@ def init_database():
 
     try:
         with connection.cursor() as cursor:
+
+            # ------------------------------------------------
+            # Tabla movements
+            # ------------------------------------------------
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS movements (
@@ -169,32 +207,53 @@ def init_database():
                     category VARCHAR(100) NOT NULL,
                     other_detail TEXT,
                     deleted_at TIMESTAMPTZ NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMPTZ NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+            # ------------------------------------------------
+            # Tabla admin
+            # ------------------------------------------------
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS admin (
                     id SERIAL PRIMARY KEY,
                     username VARCHAR(100) UNIQUE NOT NULL,
                     password TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMPTZ NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP
                 );
             """)
 
+            # ------------------------------------------------
+            # Buscar administrador
+            # ------------------------------------------------
+
             cursor.execute("""
-                SELECT id
+                SELECT id, username, password
                 FROM admin
                 WHERE username = %s
                 LIMIT 1;
-            """, (ADMIN_USERNAME,))
+            """, (
+                ADMIN_USERNAME,
+            ))
 
-            admin_exists = cursor.fetchone()
+            existing_admin = cursor.fetchone()
 
-            if not admin_exists:
-                hashed_password = generate_password_hash(ADMIN_PASSWORD)
+            # ------------------------------------------------
+            # Crear administrador si no existe
+            # ------------------------------------------------
+
+            if not existing_admin:
+
+                hashed_password = generate_password_hash(
+                    ADMIN_PASSWORD
+                )
 
                 cursor.execute("""
                     INSERT INTO admin (
@@ -207,10 +266,75 @@ def init_database():
                     hashed_password
                 ))
 
+                print(
+                    f"Administrador '{ADMIN_USERNAME}' creado."
+                )
+
+            # ------------------------------------------------
+            # Actualizar contraseña si ya existe
+            # ------------------------------------------------
+            else:
+
+                stored_password = existing_admin[2]
+
+                password_is_valid = False
+
+                try:
+                    password_is_valid = check_password_hash(
+                        stored_password,
+                        ADMIN_PASSWORD
+                    )
+                except Exception:
+                    password_is_valid = False
+
+                # Si la contraseña configurada en Render
+                # NO coincide con la almacenada, se actualiza.
+                if not password_is_valid:
+
+                    new_hashed_password = (
+                        generate_password_hash(
+                            ADMIN_PASSWORD
+                        )
+                    )
+
+                    cursor.execute("""
+                        UPDATE admin
+                        SET
+                            password = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s;
+                    """, (
+                        new_hashed_password,
+                        existing_admin[0]
+                    ))
+
+                    print(
+                        f"Contraseña del administrador "
+                        f"'{ADMIN_USERNAME}' actualizada."
+                    )
+
             connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
 
     finally:
         connection.close()
+
+
+# ============================================================
+# INICIALIZAR BASE DE DATOS AL CARGAR LA APP
+# ============================================================
+
+try:
+    init_database()
+    print("Conexión con Supabase correcta.")
+except Exception as error:
+    print(
+        "ADVERTENCIA: no se pudo inicializar la base de datos."
+    )
+    print(error)
 
 
 # ============================================================
@@ -244,6 +368,7 @@ def health():
         })
 
     except Exception as error:
+
         return jsonify({
             "ok": False,
             "database": "error",
@@ -252,20 +377,34 @@ def health():
 
 
 # ============================================================
-# AUTENTICACIÓN
+# AUTENTICACIÓN - ESTADO
 # ============================================================
 
-@app.route("/api/auth/status", methods=["GET"])
+@app.route(
+    "/api/auth/status",
+    methods=["GET"]
+)
 def auth_status():
+
     return jsonify({
         "ok": True,
         "authenticated": is_admin(),
-        "username": session.get("admin_username")
+        "username": session.get(
+            "admin_username"
+        )
     })
 
 
-@app.route("/api/auth/login", methods=["POST"])
+# ============================================================
+# LOGIN
+# ============================================================
+
+@app.route(
+    "/api/auth/login",
+    methods=["POST"]
+)
 def login():
+
     data = get_json_data()
 
     if not data:
@@ -274,58 +413,100 @@ def login():
             "error": "Datos inválidos."
         }), 400
 
-    username = str(data.get("username", "")).strip()
-    password = str(data.get("password", ""))
+    username = str(
+        data.get("username", "")
+    ).strip()
+
+    password = str(
+        data.get("password", "")
+    )
 
     if not username or not password:
+
         return jsonify({
             "ok": False,
-            "error": "Usuario y contraseña son obligatorios."
+            "error": (
+                "Usuario y contraseña "
+                "son obligatorios."
+            )
         }), 400
 
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
-                SELECT id, username, password
+                SELECT
+                    id,
+                    username,
+                    password
                 FROM admin
                 WHERE username = %s
                 LIMIT 1;
-            """, (username,))
+            """, (
+                username,
+            ))
 
             admin = cursor.fetchone()
 
             if not admin:
+
                 return jsonify({
                     "ok": False,
-                    "error": "Usuario o contraseña incorrectos."
+                    "error": (
+                        "Usuario o contraseña "
+                        "incorrectos."
+                    )
                 }), 401
 
             stored_password = admin["password"]
 
             valid_password = False
 
-            # Contraseñas nuevas almacenadas con Werkzeug.
+            # ------------------------------------------------
+            # Contraseña con hash
+            # ------------------------------------------------
+
             try:
+
                 valid_password = check_password_hash(
                     stored_password,
                     password
                 )
-            except (ValueError, TypeError):
+
+            except (
+                ValueError,
+                TypeError
+            ):
+
                 valid_password = False
 
-            # Compatibilidad con una contraseña antigua almacenada
-            # como texto plano.
-            if not valid_password and stored_password == password:
+            # ------------------------------------------------
+            # Compatibilidad con contraseña antigua
+            # en texto plano
+            # ------------------------------------------------
+
+            if (
+                not valid_password
+                and stored_password == password
+            ):
+
                 valid_password = True
 
-                new_hash = generate_password_hash(password)
+                new_hash = (
+                    generate_password_hash(
+                        password
+                    )
+                )
 
                 cursor.execute("""
                     UPDATE admin
-                    SET password = %s,
+                    SET
+                        password = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s;
                 """, (
@@ -336,15 +517,28 @@ def login():
                 connection.commit()
 
             if not valid_password:
+
                 return jsonify({
                     "ok": False,
-                    "error": "Usuario o contraseña incorrectos."
+                    "error": (
+                        "Usuario o contraseña "
+                        "incorrectos."
+                    )
                 }), 401
 
+            # ------------------------------------------------
+            # Crear sesión
+            # ------------------------------------------------
+
             session.clear()
+
             session.permanent = True
+
             session["admin_logged_in"] = True
-            session["admin_username"] = admin["username"]
+
+            session["admin_username"] = (
+                admin["username"]
+            )
 
             return jsonify({
                 "ok": True,
@@ -356,8 +550,16 @@ def login():
         connection.close()
 
 
-@app.route("/api/auth/logout", methods=["POST"])
+# ============================================================
+# LOGOUT
+# ============================================================
+
+@app.route(
+    "/api/auth/logout",
+    methods=["POST"]
+)
 def logout():
+
     session.clear()
 
     return jsonify({
@@ -369,31 +571,61 @@ def logout():
 # OBTENER MOVIMIENTOS
 # ============================================================
 
-@app.route("/api/movements", methods=["GET"])
+@app.route(
+    "/api/movements",
+    methods=["GET"]
+)
 def get_movements():
+
     include_deleted = (
-        request.args.get("include_deleted", "false").lower() == "true"
+        request.args
+        .get(
+            "include_deleted",
+            "false"
+        )
+        .lower() == "true"
     )
 
     try:
-        limit = int(request.args.get("limit", 100))
+        limit = int(
+            request.args.get(
+                "limit",
+                100
+            )
+        )
     except ValueError:
         limit = 100
 
     try:
-        offset = int(request.args.get("offset", 0))
+        offset = int(
+            request.args.get(
+                "offset",
+                0
+            )
+        )
     except ValueError:
         offset = 0
 
-    limit = max(1, min(limit, 500))
-    offset = max(0, offset)
+    limit = max(
+        1,
+        min(limit, 500)
+    )
+
+    offset = max(
+        0,
+        offset
+    )
 
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             if include_deleted:
+
                 auth_error = require_admin()
 
                 if auth_error:
@@ -412,14 +644,18 @@ def get_movements():
                         created_at,
                         updated_at
                     FROM movements
-                    ORDER BY date DESC, id DESC
-                    LIMIT %s OFFSET %s;
+                    ORDER BY
+                        date DESC,
+                        id DESC
+                    LIMIT %s
+                    OFFSET %s;
                 """, (
                     limit,
                     offset
                 ))
 
             else:
+
                 cursor.execute("""
                     SELECT
                         id,
@@ -434,8 +670,11 @@ def get_movements():
                         updated_at
                     FROM movements
                     WHERE deleted_at IS NULL
-                    ORDER BY date DESC, id DESC
-                    LIMIT %s OFFSET %s;
+                    ORDER BY
+                        date DESC,
+                        id DESC
+                    LIMIT %s
+                    OFFSET %s;
                 """, (
                     limit,
                     offset
@@ -470,12 +709,19 @@ def get_movements():
 # OBTENER UN MOVIMIENTO
 # ============================================================
 
-@app.route("/api/movements/<int:movement_id>", methods=["GET"])
+@app.route(
+    "/api/movements/<int:movement_id>",
+    methods=["GET"]
+)
 def get_movement(movement_id):
+
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
                 SELECT
@@ -492,14 +738,19 @@ def get_movement(movement_id):
                 FROM movements
                 WHERE id = %s
                 LIMIT 1;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             row = cursor.fetchone()
 
             if not row:
+
                 return jsonify({
                     "ok": False,
-                    "error": "Movimiento no encontrado."
+                    "error": (
+                        "Movimiento no encontrado."
+                    )
                 }), 404
 
             return jsonify({
@@ -515,8 +766,12 @@ def get_movement(movement_id):
 # CREAR MOVIMIENTO
 # ============================================================
 
-@app.route("/api/movements", methods=["POST"])
+@app.route(
+    "/api/movements",
+    methods=["POST"]
+)
 def create_movement():
+
     auth_error = require_admin()
 
     if auth_error:
@@ -524,20 +779,43 @@ def create_movement():
 
     data = get_json_data()
 
-    validation_error = validate_movement_data(data)
+    validation_error = (
+        validate_movement_data(data)
+    )
 
     if validation_error:
+
         return jsonify({
             "ok": False,
             "error": validation_error
         }), 400
 
-    movement_type = str(data["type"]).strip().lower()
-    amount = Decimal(str(data["amount"]))
-    description = str(data["description"]).strip()
-    date_value = str(data["date"]).strip()
-    category = str(data["category"]).strip()
-    other_detail = str(data.get("other_detail", "")).strip()
+    movement_type = str(
+        data["type"]
+    ).strip().lower()
+
+    amount = Decimal(
+        str(data["amount"])
+    )
+
+    description = str(
+        data["description"]
+    ).strip()
+
+    date_value = str(
+        data["date"]
+    ).strip()
+
+    category = str(
+        data["category"]
+    ).strip()
+
+    other_detail = str(
+        data.get(
+            "other_detail",
+            ""
+        )
+    ).strip()
 
     if category.lower() != "otros":
         other_detail = None
@@ -545,7 +823,10 @@ def create_movement():
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
                 INSERT INTO movements (
@@ -556,7 +837,14 @@ def create_movement():
                     category,
                     other_detail
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
                 RETURNING
                     id,
                     type,
@@ -583,7 +871,9 @@ def create_movement():
 
             return jsonify({
                 "ok": True,
-                "movement": movement_to_dict(movement)
+                "movement": movement_to_dict(
+                    movement
+                )
             }), 201
 
     except Exception:
@@ -598,8 +888,12 @@ def create_movement():
 # EDITAR MOVIMIENTO
 # ============================================================
 
-@app.route("/api/movements/<int:movement_id>", methods=["PUT"])
+@app.route(
+    "/api/movements/<int:movement_id>",
+    methods=["PUT"]
+)
 def update_movement(movement_id):
+
     auth_error = require_admin()
 
     if auth_error:
@@ -607,20 +901,43 @@ def update_movement(movement_id):
 
     data = get_json_data()
 
-    validation_error = validate_movement_data(data)
+    validation_error = (
+        validate_movement_data(data)
+    )
 
     if validation_error:
+
         return jsonify({
             "ok": False,
             "error": validation_error
         }), 400
 
-    movement_type = str(data["type"]).strip().lower()
-    amount = Decimal(str(data["amount"]))
-    description = str(data["description"]).strip()
-    date_value = str(data["date"]).strip()
-    category = str(data["category"]).strip()
-    other_detail = str(data.get("other_detail", "")).strip()
+    movement_type = str(
+        data["type"]
+    ).strip().lower()
+
+    amount = Decimal(
+        str(data["amount"])
+    )
+
+    description = str(
+        data["description"]
+    ).strip()
+
+    date_value = str(
+        data["date"]
+    ).strip()
+
+    category = str(
+        data["category"]
+    ).strip()
+
+    other_detail = str(
+        data.get(
+            "other_detail",
+            ""
+        )
+    ).strip()
 
     if category.lower() != "otros":
         other_detail = None
@@ -628,21 +945,29 @@ def update_movement(movement_id):
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
                 SELECT id
                 FROM movements
                 WHERE id = %s
                 LIMIT 1;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             existing = cursor.fetchone()
 
             if not existing:
+
                 return jsonify({
                     "ok": False,
-                    "error": "Movimiento no encontrado."
+                    "error": (
+                        "Movimiento no encontrado."
+                    )
                 }), 404
 
             cursor.execute("""
@@ -683,7 +1008,9 @@ def update_movement(movement_id):
 
             return jsonify({
                 "ok": True,
-                "movement": movement_to_dict(movement)
+                "movement": movement_to_dict(
+                    movement
+                )
             })
 
     except Exception:
@@ -698,8 +1025,12 @@ def update_movement(movement_id):
 # ELIMINACIÓN LÓGICA
 # ============================================================
 
-@app.route("/api/movements/<int:movement_id>", methods=["DELETE"])
+@app.route(
+    "/api/movements/<int:movement_id>",
+    methods=["DELETE"]
+)
 def delete_movement(movement_id):
+
     auth_error = require_admin()
 
     if auth_error:
@@ -708,27 +1039,40 @@ def delete_movement(movement_id):
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
-                SELECT id, deleted_at
+                SELECT
+                    id,
+                    deleted_at
                 FROM movements
                 WHERE id = %s
                 LIMIT 1;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             movement = cursor.fetchone()
 
             if not movement:
+
                 return jsonify({
                     "ok": False,
-                    "error": "Movimiento no encontrado."
+                    "error": (
+                        "Movimiento no encontrado."
+                    )
                 }), 404
 
             if movement["deleted_at"] is not None:
+
                 return jsonify({
                     "ok": False,
-                    "error": "El movimiento ya está eliminado."
+                    "error": (
+                        "El movimiento ya está eliminado."
+                    )
                 }), 400
 
             cursor.execute("""
@@ -748,7 +1092,9 @@ def delete_movement(movement_id):
                     deleted_at,
                     created_at,
                     updated_at;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             deleted_movement = cursor.fetchone()
 
@@ -756,8 +1102,13 @@ def delete_movement(movement_id):
 
             return jsonify({
                 "ok": True,
-                "message": "Movimiento eliminado correctamente.",
-                "movement": movement_to_dict(deleted_movement)
+                "message": (
+                    "Movimiento eliminado "
+                    "correctamente."
+                ),
+                "movement": movement_to_dict(
+                    deleted_movement
+                )
             })
 
     except Exception:
@@ -769,11 +1120,15 @@ def delete_movement(movement_id):
 
 
 # ============================================================
-# HISTORIAL DE MOVIMIENTOS ELIMINADOS
+# HISTORIAL DE ELIMINADOS
 # ============================================================
 
-@app.route("/api/admin/history", methods=["GET"])
+@app.route(
+    "/api/admin/history",
+    methods=["GET"]
+)
 def admin_history():
+
     auth_error = require_admin()
 
     if auth_error:
@@ -782,7 +1137,10 @@ def admin_history():
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
                 SELECT
@@ -798,7 +1156,9 @@ def admin_history():
                     updated_at
                 FROM movements
                 WHERE deleted_at IS NOT NULL
-                ORDER BY deleted_at DESC, id DESC;
+                ORDER BY
+                    deleted_at DESC,
+                    id DESC;
             """)
 
             rows = cursor.fetchall()
@@ -820,8 +1180,12 @@ def admin_history():
 # RESTAURAR MOVIMIENTO
 # ============================================================
 
-@app.route("/api/movements/<int:movement_id>/restore", methods=["POST"])
+@app.route(
+    "/api/movements/<int:movement_id>/restore",
+    methods=["POST"]
+)
 def restore_movement(movement_id):
+
     auth_error = require_admin()
 
     if auth_error:
@@ -830,27 +1194,40 @@ def restore_movement(movement_id):
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
-                SELECT id, deleted_at
+                SELECT
+                    id,
+                    deleted_at
                 FROM movements
                 WHERE id = %s
                 LIMIT 1;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             movement = cursor.fetchone()
 
             if not movement:
+
                 return jsonify({
                     "ok": False,
-                    "error": "Movimiento no encontrado."
+                    "error": (
+                        "Movimiento no encontrado."
+                    )
                 }), 404
 
             if movement["deleted_at"] is None:
+
                 return jsonify({
                     "ok": False,
-                    "error": "El movimiento ya está activo."
+                    "error": (
+                        "El movimiento ya está activo."
+                    )
                 }), 400
 
             cursor.execute("""
@@ -870,7 +1247,9 @@ def restore_movement(movement_id):
                     deleted_at,
                     created_at,
                     updated_at;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             restored_movement = cursor.fetchone()
 
@@ -878,8 +1257,13 @@ def restore_movement(movement_id):
 
             return jsonify({
                 "ok": True,
-                "message": "Movimiento restaurado correctamente.",
-                "movement": movement_to_dict(restored_movement)
+                "message": (
+                    "Movimiento restaurado "
+                    "correctamente."
+                ),
+                "movement": movement_to_dict(
+                    restored_movement
+                )
             })
 
     except Exception:
@@ -899,6 +1283,7 @@ def restore_movement(movement_id):
     methods=["DELETE"]
 )
 def permanent_delete_movement(movement_id):
+
     auth_error = require_admin()
 
     if auth_error:
@@ -907,7 +1292,10 @@ def permanent_delete_movement(movement_id):
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
                 SELECT
@@ -916,24 +1304,28 @@ def permanent_delete_movement(movement_id):
                 FROM movements
                 WHERE id = %s
                 LIMIT 1;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             movement = cursor.fetchone()
 
             if not movement:
-                return jsonify({
-                    "ok": False,
-                    "error": "Movimiento no encontrado."
-                }), 404
 
-            # Solo se puede eliminar permanentemente algo
-            # que ya fue enviado a la papelera.
-            if movement["deleted_at"] is None:
                 return jsonify({
                     "ok": False,
                     "error": (
-                        "Primero debes eliminar lógicamente "
-                        "el movimiento."
+                        "Movimiento no encontrado."
+                    )
+                }), 404
+
+            if movement["deleted_at"] is None:
+
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Primero debes eliminar "
+                        "lógicamente el movimiento."
                     )
                 }), 400
 
@@ -941,7 +1333,9 @@ def permanent_delete_movement(movement_id):
                 DELETE FROM movements
                 WHERE id = %s
                 RETURNING id;
-            """, (movement_id,))
+            """, (
+                movement_id,
+            ))
 
             deleted = cursor.fetchone()
 
@@ -949,7 +1343,10 @@ def permanent_delete_movement(movement_id):
 
             return jsonify({
                 "ok": True,
-                "message": "Movimiento eliminado permanentemente.",
+                "message": (
+                    "Movimiento eliminado "
+                    "permanentemente."
+                ),
                 "id": deleted["id"]
             })
 
@@ -965,12 +1362,19 @@ def permanent_delete_movement(movement_id):
 # RESUMEN / BALANCE
 # ============================================================
 
-@app.route("/api/summary", methods=["GET"])
+@app.route(
+    "/api/summary",
+    methods=["GET"]
+)
 def summary():
+
     connection = get_db_connection()
 
     try:
-        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+        with connection.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
 
             cursor.execute("""
                 SELECT
@@ -999,13 +1403,20 @@ def summary():
                     COUNT(*) AS total_movements
 
                 FROM movements
+
                 WHERE deleted_at IS NULL;
             """)
 
             result = cursor.fetchone()
 
-            income = Decimal(result["income"] or 0)
-            expenses = Decimal(result["expenses"] or 0)
+            income = Decimal(
+                result["income"] or 0
+            )
+
+            expenses = Decimal(
+                result["expenses"] or 0
+            )
+
             balance = income - expenses
 
             return jsonify({
@@ -1013,7 +1424,9 @@ def summary():
                 "income": float(income),
                 "expenses": float(expenses),
                 "balance": float(balance),
-                "total_movements": result["total_movements"]
+                "total_movements": (
+                    result["total_movements"]
+                )
             })
 
     finally:
@@ -1021,44 +1434,56 @@ def summary():
 
 
 # ============================================================
-# MANEJO DE ERRORES
+# ERRORES
 # ============================================================
 
 @app.errorhandler(404)
 def not_found(error):
+
     if request.path.startswith("/api/"):
+
         return jsonify({
             "ok": False,
-            "error": "Recurso no encontrado."
+            "error": (
+                "Recurso no encontrado."
+            )
         }), 404
 
-    return render_template("index.html"), 404
+    return render_template(
+        "index.html"
+    ), 404
 
 
 @app.errorhandler(500)
 def internal_error(error):
+
     if request.path.startswith("/api/"):
+
         return jsonify({
             "ok": False,
-            "error": "Error interno del servidor."
+            "error": (
+                "Error interno del servidor."
+            )
         }), 500
 
-    return "Error interno del servidor.", 500
+    return (
+        "Error interno del servidor.",
+        500
+    )
 
 
 # ============================================================
-# INICIALIZACIÓN
+# EJECUCIÓN LOCAL
 # ============================================================
 
 if __name__ == "__main__":
-    try:
-        init_database()
-        print("Base de datos conectada correctamente.")
-    except Exception as error:
-        print("Error conectando con la base de datos:")
-        print(error)
 
-    port = int(os.environ.get("PORT", 5000))
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
 
     app.run(
         host="0.0.0.0",
