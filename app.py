@@ -1,510 +1,215 @@
-from flask import Flask, render_template, request, jsonify, session
 import os
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from werkzeug.security import check_password_hash, generate_password_hash
+
 import psycopg2
-import psycopg2.extras
+from psycopg2.extras import RealDictCursor
+from flask import Flask, jsonify, render_template, request, session
+from werkzeug.security import check_password_hash, generate_password_hash
 
-
-# ============================================================
-# APLICACIÓN
-# ============================================================
 
 app = Flask(__name__)
 
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
 app.secret_key = os.environ.get(
     "FLASK_SECRET_KEY",
-    "vertexmont_secret_2026_change_this"
+    "change-this-secret-key-in-render"
 )
 
-app.permanent_session_lifetime = 60 * 60 * 24 * 7
-
+app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
-if os.environ.get("RENDER"):
+# En Render usamos HTTPS.
+if os.environ.get("RENDER") == "true":
     app.config["SESSION_COOKIE_SECURE"] = True
-
-
-# ============================================================
-# SUPABASE / POSTGRESQL
-# ============================================================
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not DATABASE_URL:
-    print("ADVERTENCIA: DATABASE_URL no está configurada.")
-
-
-# ============================================================
-# ADMINISTRADOR
-# ============================================================
-
-ADMIN_USERNAME = os.environ.get(
-    "ADMIN_USERNAME",
-    "admin"
-)
-
-DEFAULT_ADMIN_PASSWORD = os.environ.get(
-    "ADMIN_PASSWORD",
-    "admin123"
-)
-
-
-# ============================================================
-# CATEGORÍAS PERMITIDAS
-# ============================================================
-
-ALLOWED_CATEGORIES = {
-    "Ofrendas dominicales",
-    "Donaciones",
-    "Servicios",
-    "Mantenimiento",
-    "Alimentación",
-    "Actividades de la iglesia",
-    "Compras",
-    "Transporte",
-    "Otros"
-}
-
-ALLOWED_TYPES = {
-    "ingreso",
-    "gasto"
-}
-
-
-# ============================================================
-# FECHA / HORA
-# ============================================================
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 
 # ============================================================
 # CONEXIÓN A SUPABASE
 # ============================================================
 
-def get_db():
-    """
-    Abre una conexión PostgreSQL utilizando DATABASE_URL.
-    """
-
+def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError(
-            "DATABASE_URL no está configurada."
+            "DATABASE_URL no está configurada. "
+            "Agrega la variable DATABASE_URL en Render."
         )
 
-    connection = psycopg2.connect(
-        DATABASE_URL,
-        connect_timeout=10
-    )
+    database_url = DATABASE_URL
 
-    return connection
+    # Supabase requiere conexión SSL.
+    if "sslmode=" not in database_url:
+        separator = "&" if "?" in database_url else "?"
+        database_url += f"{separator}sslmode=require"
 
-
-# ============================================================
-# INICIALIZAR BASE DE DATOS
-# ============================================================
-
-def init_db():
-    """
-    Crea las tablas necesarias en Supabase si todavía no existen.
-    """
-
-    connection = get_db()
-
-    try:
-        cursor = connection.cursor()
-
-        # ====================================================
-        # TABLA DE MOVIMIENTOS
-        # ====================================================
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS movements (
-                id BIGSERIAL PRIMARY KEY,
-                type TEXT NOT NULL,
-                amount NUMERIC(12, 2) NOT NULL,
-                description TEXT NOT NULL,
-                date DATE NOT NULL,
-                category TEXT NOT NULL,
-                other_detail TEXT DEFAULT '',
-                deleted_at TIMESTAMPTZ DEFAULT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ DEFAULT NULL
-            )
-            """
-        )
-
-        # ====================================================
-        # TABLA DE ADMINISTRADOR
-        # ====================================================
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS admin (
-                id BIGSERIAL PRIMARY KEY,
-                username TEXT NOT NULL UNIQUE,
-                password TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ DEFAULT NULL
-            )
-            """
-        )
-
-        # ====================================================
-        # CREAR ADMINISTRADOR SI NO EXISTE
-        # ====================================================
-
-        cursor.execute(
-            """
-            SELECT id
-            FROM admin
-            WHERE username = %s
-            LIMIT 1
-            """,
-            (ADMIN_USERNAME,)
-        )
-
-        admin_exists = cursor.fetchone()
-
-        if not admin_exists:
-            password_hash = generate_password_hash(
-                DEFAULT_ADMIN_PASSWORD
-            )
-
-            cursor.execute(
-                """
-                INSERT INTO admin (
-                    username,
-                    password,
-                    created_at
-                )
-                VALUES (%s, %s, %s)
-                """,
-                (
-                    ADMIN_USERNAME,
-                    password_hash,
-                    now_iso()
-                )
-            )
-
-            print(
-                "Administrador Supabase creado:",
-                ADMIN_USERNAME
-            )
-
-        connection.commit()
-
-    finally:
-        connection.close()
+    return psycopg2.connect(database_url)
 
 
 # ============================================================
-# CONVERTIR ROW A DICCIONARIO
+# UTILIDADES
 # ============================================================
 
-def row_to_dict(cursor, row):
-    if row is None:
-        return None
+def utc_now():
+    return datetime.now(timezone.utc)
 
-    columns = [
-        description[0]
-        for description in cursor.description
-    ]
-
-    return dict(
-        zip(columns, row)
-    )
-
-
-# ============================================================
-# RESPUESTA ESTÁNDAR DE ERROR
-# ============================================================
-
-def api_error(message, status=400):
-    return jsonify({
-        "ok": False,
-        "error": message
-    }), status
-
-
-# ============================================================
-# VALIDAR SESIÓN ADMINISTRATIVA
-# ============================================================
 
 def is_admin():
-    return bool(
-        session.get("admin", False)
-    )
+    return session.get("admin_logged_in") is True
 
 
 def require_admin():
     if not is_admin():
-        return api_error(
-            "No autorizado. Debes iniciar sesión como administrador.",
-            401
-        )
+        return jsonify({
+            "ok": False,
+            "error": "No autorizado"
+        }), 401
+
+    return None
+
+
+def movement_to_dict(row):
+    if not row:
+        return None
+
+    result = dict(row)
+
+    if isinstance(result.get("amount"), Decimal):
+        result["amount"] = float(result["amount"])
+
+    for field in ["created_at", "updated_at", "deleted_at"]:
+        if result.get(field) is not None:
+            result[field] = result[field].isoformat()
+
+    if result.get("date") is not None:
+        result["date"] = result["date"].isoformat()
+
+    return result
+
+
+def get_json_data():
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return None
+
+    return data
+
+
+def validate_movement_data(data):
+    if not data:
+        return "No se recibieron datos."
+
+    movement_type = str(data.get("type", "")).strip().lower()
+    amount_value = data.get("amount")
+    description = str(data.get("description", "")).strip()
+    date_value = str(data.get("date", "")).strip()
+    category = str(data.get("category", "")).strip()
+    other_detail = str(data.get("other_detail", "")).strip()
+
+    if movement_type not in ["income", "expense"]:
+        return "El tipo debe ser income o expense."
+
+    if amount_value is None or str(amount_value).strip() == "":
+        return "El monto es obligatorio."
+
+    try:
+        amount = Decimal(str(amount_value))
+    except (InvalidOperation, ValueError):
+        return "El monto no es válido."
+
+    if amount <= 0:
+        return "El monto debe ser mayor que cero."
+
+    if not description:
+        return "La descripción es obligatoria."
+
+    if not date_value:
+        return "La fecha es obligatoria."
+
+    try:
+        datetime.strptime(date_value, "%Y-%m-%d")
+    except ValueError:
+        return "La fecha debe tener el formato YYYY-MM-DD."
+
+    if not category:
+        return "La categoría es obligatoria."
+
+    if category.lower() == "otros" and not other_detail:
+        return "Debes especificar el detalle de 'Otros'."
 
     return None
 
 
 # ============================================================
-# CONVERSIÓN DE MONTO
+# CREACIÓN / VERIFICACIÓN DE TABLAS
 # ============================================================
 
-def parse_amount(value):
-    try:
-        amount = Decimal(
-            str(value).strip()
-        )
-
-    except (
-        InvalidOperation,
-        ValueError,
-        TypeError
-    ):
-        return None
-
-    if amount <= 0:
-        return None
-
-    return amount
-
-
-# ============================================================
-# NORMALIZAR MOVIMIENTO
-# ============================================================
-
-def normalize_movement(movement):
-
-    if not isinstance(movement, dict):
-        return movement
-
-    result = dict(movement)
-
-    # ========================================================
-    # CONVERTIR MONTO
-    # ========================================================
-
-    if "amount" in result:
-        try:
-            result["amount"] = float(
-                result["amount"]
-            )
-
-        except (
-            ValueError,
-            TypeError
-        ):
-            pass
-
-    # ========================================================
-    # CONVERTIR FECHA POSTGRESQL
-    # ========================================================
-
-    if "date" in result:
-        if hasattr(result["date"], "isoformat"):
-            result["date"] = result["date"].isoformat()
-
-    # ========================================================
-    # CONVERTIR FECHAS TIMESTAMP
-    # ========================================================
-
-    for field in [
-        "deleted_at",
-        "created_at",
-        "updated_at"
-    ]:
-
-        if field in result:
-            if hasattr(
-                result[field],
-                "isoformat"
-            ):
-                result[field] = result[field].isoformat()
-
-    # ========================================================
-    # COMPATIBILIDAD CON NOMBRES ALTERNATIVOS
-    # ========================================================
-
-    if "other_detail" not in result:
-        if "otherDetail" in result:
-            result["other_detail"] = result["otherDetail"]
-
-    if "deleted_at" not in result:
-        if "deletedAt" in result:
-            result["deleted_at"] = result["deletedAt"]
-
-    if "created_at" not in result:
-        if "createdAt" in result:
-            result["created_at"] = result["createdAt"]
-
-    if "updated_at" not in result:
-        if "updatedAt" in result:
-            result["updated_at"] = result["updatedAt"]
-
-    return result
-
-
-# ============================================================
-# CARGAR ADMINISTRADOR
-# ============================================================
-
-def load_admin():
-
-    connection = get_db()
+def init_database():
+    connection = get_db_connection()
 
     try:
-        cursor = connection.cursor()
+        with connection.cursor() as cursor:
 
-        cursor.execute(
-            """
-            SELECT *
-            FROM admin
-            WHERE username = %s
-            LIMIT 1
-            """,
-            (ADMIN_USERNAME,)
-        )
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS movements (
+                    id SERIAL PRIMARY KEY,
+                    type VARCHAR(20) NOT NULL,
+                    amount NUMERIC(12, 2) NOT NULL,
+                    description TEXT NOT NULL,
+                    date DATE NOT NULL,
+                    category VARCHAR(100) NOT NULL,
+                    other_detail TEXT,
+                    deleted_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-        row = cursor.fetchone()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admin (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(100) UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-        return row_to_dict(
-            cursor,
-            row
-        )
+            cursor.execute("""
+                SELECT id
+                FROM admin
+                WHERE username = %s
+                LIMIT 1;
+            """, (ADMIN_USERNAME,))
 
-    except Exception as error:
+            admin_exists = cursor.fetchone()
 
-        print(
-            "ERROR cargando administrador:",
-            error
-        )
+            if not admin_exists:
+                hashed_password = generate_password_hash(ADMIN_PASSWORD)
 
-        return None
+                cursor.execute("""
+                    INSERT INTO admin (
+                        username,
+                        password
+                    )
+                    VALUES (%s, %s);
+                """, (
+                    ADMIN_USERNAME,
+                    hashed_password
+                ))
+
+            connection.commit()
 
     finally:
-        connection.close()
-
-
-# ============================================================
-# PASSWORD
-# ============================================================
-
-def is_password_hash(value):
-
-    value = str(
-        value or ""
-    )
-
-    return (
-        value.startswith("scrypt:")
-        or value.startswith("pbkdf2:")
-        or value.startswith("argon2:")
-    )
-
-
-def verify_password(
-    stored_password,
-    entered_password
-):
-
-    stored_password = str(
-        stored_password or ""
-    )
-
-    entered_password = str(
-        entered_password or ""
-    )
-
-    if not stored_password:
-        return False
-
-    if is_password_hash(
-        stored_password
-    ):
-
-        try:
-
-            return check_password_hash(
-                stored_password,
-                entered_password
-            )
-
-        except Exception as error:
-
-            print(
-                "ERROR verificando contraseña:",
-                error
-            )
-
-            return False
-
-    # Compatibilidad con contraseña antigua
-    # guardada como texto plano.
-
-    return stored_password == entered_password
-
-
-# ============================================================
-# GUARDAR HASH DE PASSWORD
-# ============================================================
-
-def save_admin_password(
-    admin_data,
-    password
-):
-
-    if not admin_data:
-        return False
-
-    admin_id = admin_data.get("id")
-
-    if admin_id is None:
-        return False
-
-    password_hash = generate_password_hash(
-        password
-    )
-
-    connection = get_db()
-
-    try:
-
-        connection.execute(
-            """
-            UPDATE admin
-            SET
-                password = %s,
-                updated_at = %s
-            WHERE id = %s
-            """,
-            (
-                password_hash,
-                now_iso(),
-                admin_id
-            )
-        )
-
-        connection.commit()
-
-        return True
-
-    except Exception as error:
-
-        print(
-            "AVISO actualizando contraseña:",
-            error
-        )
-
-        return False
-
-    finally:
-
         connection.close()
 
 
@@ -514,10 +219,7 @@ def save_admin_password(
 
 @app.route("/")
 def index():
-
-    return render_template(
-        "index.html"
-    )
+    return render_template("index.html")
 
 
 # ============================================================
@@ -526,1700 +228,837 @@ def index():
 
 @app.route("/health")
 def health():
-
     try:
+        connection = get_db_connection()
 
-        connection = get_db()
-
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            SELECT COUNT(*) AS total
-            FROM movements
-            """
-        )
-
-        result = cursor.fetchone()
-
-        total = result[0]
-
-        connection.close()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1;")
+                cursor.fetchone()
+        finally:
+            connection.close()
 
         return jsonify({
-            "status": "ok",
-            "database": True,
-            "database_type": "supabase_postgresql",
-            "movements": total
+            "ok": True,
+            "database": "connected"
         })
 
     except Exception as error:
-
-        print(
-            "ERROR health:",
-            error
-        )
-
         return jsonify({
-            "status": "error",
-            "database": False,
-            "database_type": "supabase_postgresql",
-            "message": str(error)
+            "ok": False,
+            "database": "error",
+            "error": str(error)
         }), 500
 
 
 # ============================================================
-# AUTH — ESTADO
+# AUTENTICACIÓN
 # ============================================================
 
-@app.route(
-    "/api/auth/status",
-    methods=["GET"]
-)
+@app.route("/api/auth/status", methods=["GET"])
 def auth_status():
-
     return jsonify({
         "ok": True,
-        "authenticated": is_admin()
+        "authenticated": is_admin(),
+        "username": session.get("admin_username")
     })
 
 
-# ============================================================
-# AUTH — LOGIN
-# ============================================================
+@app.route("/api/auth/login", methods=["POST"])
+def login():
+    data = get_json_data()
 
-@app.route(
-    "/api/auth/login",
-    methods=["POST"]
-)
-def auth_login():
+    if not data:
+        return jsonify({
+            "ok": False,
+            "error": "Datos inválidos."
+        }), 400
 
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-    username = str(
-        data.get(
-            "username",
-            ""
-        )
-    ).strip()
-
-    password = str(
-        data.get(
-            "password",
-            ""
-        )
-    )
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
 
     if not username or not password:
+        return jsonify({
+            "ok": False,
+            "error": "Usuario y contraseña son obligatorios."
+        }), 400
 
-        return api_error(
-            "Introduce usuario y contraseña.",
-            400
-        )
+    connection = get_db_connection()
 
-    if username != ADMIN_USERNAME:
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
 
-        return api_error(
-            "Usuario o contraseña incorrectos.",
-            401
-        )
+            cursor.execute("""
+                SELECT id, username, password
+                FROM admin
+                WHERE username = %s
+                LIMIT 1;
+            """, (username,))
 
-    admin_data = load_admin()
+            admin = cursor.fetchone()
 
-    if not admin_data:
+            if not admin:
+                return jsonify({
+                    "ok": False,
+                    "error": "Usuario o contraseña incorrectos."
+                }), 401
 
-        return api_error(
-            "No se pudo cargar la configuración del administrador.",
-            500
-        )
+            stored_password = admin["password"]
 
-    stored_username = str(
-        admin_data.get(
-            "username",
-            ADMIN_USERNAME
-        )
-    ).strip()
+            valid_password = False
 
-    stored_password = str(
-        admin_data.get(
-            "password",
-            ""
-        )
-    )
+            # Contraseñas nuevas almacenadas con Werkzeug.
+            try:
+                valid_password = check_password_hash(
+                    stored_password,
+                    password
+                )
+            except (ValueError, TypeError):
+                valid_password = False
 
-    if username != stored_username:
+            # Compatibilidad con una contraseña antigua almacenada
+            # como texto plano.
+            if not valid_password and stored_password == password:
+                valid_password = True
 
-        return api_error(
-            "Usuario o contraseña incorrectos.",
-            401
-        )
+                new_hash = generate_password_hash(password)
 
-    password_correct = verify_password(
-        stored_password,
-        password
-    )
+                cursor.execute("""
+                    UPDATE admin
+                    SET password = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s;
+                """, (
+                    new_hash,
+                    admin["id"]
+                ))
 
-    # Si la contraseña antigua estaba
-    # en texto plano, convertirla a hash.
+                connection.commit()
 
-    if (
-        password_correct
-        and stored_password
-        and not is_password_hash(
-            stored_password
-        )
-    ):
+            if not valid_password:
+                return jsonify({
+                    "ok": False,
+                    "error": "Usuario o contraseña incorrectos."
+                }), 401
 
-        save_admin_password(
-            admin_data,
-            password
-        )
+            session.clear()
+            session.permanent = True
+            session["admin_logged_in"] = True
+            session["admin_username"] = admin["username"]
 
-    if not password_correct:
+            return jsonify({
+                "ok": True,
+                "authenticated": True,
+                "username": admin["username"]
+            })
 
-        return api_error(
-            "Usuario o contraseña incorrectos.",
-            401
-        )
+    finally:
+        connection.close()
 
-    # Crear sesión.
 
+@app.route("/api/auth/logout", methods=["POST"])
+def logout():
     session.clear()
 
-    session["admin"] = True
-    session["username"] = ADMIN_USERNAME
-
-    session.permanent = True
-
     return jsonify({
-        "ok": True,
-        "authenticated": True
+        "ok": True
     })
 
 
 # ============================================================
-# AUTH — LOGOUT
+# OBTENER MOVIMIENTOS
 # ============================================================
 
-@app.route(
-    "/api/auth/logout",
-    methods=["POST"]
-)
-def auth_logout():
-
-    session.clear()
-
-    return jsonify({
-        "ok": True,
-        "authenticated": False
-    })
-
-
-# ============================================================
-# CONSTRUIR FILTROS POSTGRESQL
-# ============================================================
-
-def build_movement_filters(
-    include_deleted=False
-):
-
-    conditions = []
-    parameters = []
-
-    # ========================================================
-    # ELIMINADOS / ACTIVOS
-    # ========================================================
-
-    deleted = str(
-        request.args.get(
-            "deleted",
-            ""
-        )
-    ).strip().lower()
-
-    if deleted == "true":
-        include_deleted = True
-
-    if include_deleted:
-
-        conditions.append(
-            "deleted_at IS NOT NULL"
-        )
-
-    else:
-
-        conditions.append(
-            "deleted_at IS NULL"
-        )
-
-    # ========================================================
-    # BÚSQUEDA
-    # ========================================================
-
-    search = str(
-        request.args.get(
-            "search",
-            ""
-        )
-    ).strip()
-
-    if search:
-
-        conditions.append(
-            """
-            (
-                description ILIKE %s
-                OR other_detail ILIKE %s
-                OR category ILIKE %s
-            )
-            """
-        )
-
-        search_value = f"%{search}%"
-
-        parameters.extend([
-            search_value,
-            search_value,
-            search_value
-        ])
-
-    # ========================================================
-    # FECHA DESDE
-    # ========================================================
-
-    date_from = str(
-        request.args.get(
-            "from",
-            ""
-        )
-    ).strip()
-
-    if date_from:
-
-        conditions.append(
-            "date >= %s"
-        )
-
-        parameters.append(
-            date_from
-        )
-
-    # ========================================================
-    # FECHA HASTA
-    # ========================================================
-
-    date_to = str(
-        request.args.get(
-            "to",
-            ""
-        )
-    ).strip()
-
-    if date_to:
-
-        conditions.append(
-            "date <= %s"
-        )
-
-        parameters.append(
-            date_to
-        )
-
-    # ========================================================
-    # TIPO
-    # ========================================================
-
-    movement_type = str(
-        request.args.get(
-            "type",
-            ""
-        )
-    ).strip()
-
-    if movement_type in ALLOWED_TYPES:
-
-        conditions.append(
-            "type = %s"
-        )
-
-        parameters.append(
-            movement_type
-        )
-
-    # ========================================================
-    # CATEGORÍA
-    # ========================================================
-
-    category = str(
-        request.args.get(
-            "category",
-            ""
-        )
-    ).strip()
-
-    if category in ALLOWED_CATEGORIES:
-
-        conditions.append(
-            "category = %s"
-        )
-
-        parameters.append(
-            category
-        )
-
-    # ========================================================
-    # WHERE
-    # ========================================================
-
-    where_sql = ""
-
-    if conditions:
-
-        where_sql = (
-            "WHERE "
-            + " AND ".join(
-                conditions
-            )
-        )
-
-    return where_sql, parameters
-
-
-# ============================================================
-# API — OBTENER MOVIMIENTOS
-# ============================================================
-
-@app.route(
-    "/api/movements",
-    methods=["GET"]
-)
+@app.route("/api/movements", methods=["GET"])
 def get_movements():
-
-    try:
-
-        deleted_requested = (
-            request.args.get(
-                "deleted",
-                ""
-            ).lower() == "true"
-        )
-
-        # El historial eliminado requiere
-        # sesión administrativa.
-
-        if deleted_requested:
-
-            unauthorized = require_admin()
-
-            if unauthorized:
-                return unauthorized
-
-        # ====================================================
-        # LIMIT
-        # ====================================================
-
-        try:
-
-            limit = int(
-                request.args.get(
-                    "limit",
-                    "10"
-                )
-            )
-
-        except ValueError:
-
-            limit = 10
-
-        # ====================================================
-        # OFFSET
-        # ====================================================
-
-        try:
-
-            offset = int(
-                request.args.get(
-                    "offset",
-                    "0"
-                )
-            )
-
-        except ValueError:
-
-            offset = 0
-
-        limit = max(
-            1,
-            min(
-                limit,
-                500
-            )
-        )
-
-        offset = max(
-            0,
-            offset
-        )
-
-        # ====================================================
-        # FILTROS
-        # ====================================================
-
-        where_sql, parameters = (
-            build_movement_filters(
-                include_deleted=deleted_requested
-            )
-        )
-
-        connection = get_db()
-
-        cursor = connection.cursor()
-
-        # ====================================================
-        # TOTAL
-        # ====================================================
-
-        cursor.execute(
-            f"""
-            SELECT COUNT(*) AS total
-            FROM movements
-            {where_sql}
-            """,
-            parameters
-        )
-
-        total = cursor.fetchone()[0]
-
-        # ====================================================
-        # MOVIMIENTOS
-        # ====================================================
-
-        cursor.execute(
-            f"""
-            SELECT *
-            FROM movements
-            {where_sql}
-            ORDER BY date DESC, id DESC
-            LIMIT %s OFFSET %s
-            """,
-            parameters + [
-                limit,
-                offset
-            ]
-        )
-
-        rows = cursor.fetchall()
-
-        movements = [
-            normalize_movement(
-                row_to_dict(
-                    cursor,
-                    row
-                )
-            )
-            for row in rows
-        ]
-
-        connection.close()
-
-        return jsonify({
-            "ok": True,
-            "movements": movements,
-            "total": total,
-            "limit": limit,
-            "offset": offset
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR en /api/movements:",
-            error
-        )
-
-        return api_error(
-            "Error interno cargando los movimientos.",
-            500
-        )
-
-
-# ============================================================
-# API — OBTENER UN MOVIMIENTO
-# ============================================================
-
-@app.route(
-    "/api/movements/<movement_id>",
-    methods=["GET"]
-)
-def get_movement(
-    movement_id
-):
-
-    try:
-
-        try:
-
-            movement_id = int(
-                movement_id
-            )
-
-        except ValueError:
-
-            return api_error(
-                "ID de movimiento inválido.",
-                400
-            )
-
-        connection = get_db()
-
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
-
-        row = cursor.fetchone()
-
-        if not row:
-
-            connection.close()
-
-            return api_error(
-                "Movimiento no encontrado.",
-                404
-            )
-
-        movement = normalize_movement(
-            row_to_dict(
-                cursor,
-                row
-            )
-        )
-
-        connection.close()
-
-        return jsonify({
-            "ok": True,
-            "movement": movement
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR obteniendo movimiento:",
-            error
-        )
-
-        return api_error(
-            "Error interno obteniendo el movimiento.",
-            500
-        )
-
-
-# ============================================================
-# VALIDAR DATOS DEL MOVIMIENTO
-# ============================================================
-
-def validate_movement_data(data):
-
-    if not isinstance(
-        data,
-        dict
-    ):
-
-        return None, "Datos inválidos."
-
-    # ========================================================
-    # TIPO
-    # ========================================================
-
-    movement_type = str(
-        data.get(
-            "type",
-            ""
-        )
-    ).strip()
-
-    if movement_type not in ALLOWED_TYPES:
-
-        return None, (
-            "El tipo de movimiento no es válido."
-        )
-
-    # ========================================================
-    # MONTO
-    # ========================================================
-
-    amount = parse_amount(
-        data.get("amount")
+    include_deleted = (
+        request.args.get("include_deleted", "false").lower() == "true"
     )
 
-    if amount is None:
-
-        return None, (
-            "El monto debe ser mayor que 0."
-        )
-
-    # ========================================================
-    # DESCRIPCIÓN
-    # ========================================================
-
-    description = str(
-        data.get(
-            "description",
-            ""
-        )
-    ).strip()
-
-    if not description:
-
-        return None, (
-            "La descripción es obligatoria."
-        )
-
-    if len(description) > 180:
-
-        return None, (
-            "La descripción no puede superar "
-            "los 180 caracteres."
-        )
-
-    # ========================================================
-    # FECHA
-    # ========================================================
-
-    movement_date = str(
-        data.get(
-            "date",
-            ""
-        )
-    ).strip()
-
-    if not movement_date:
-
-        return None, (
-            "La fecha es obligatoria."
-        )
-
     try:
-
-        datetime.strptime(
-            movement_date,
-            "%Y-%m-%d"
-        )
-
+        limit = int(request.args.get("limit", 100))
     except ValueError:
-
-        return None, (
-            "La fecha no tiene un formato válido."
-        )
-
-    # ========================================================
-    # CATEGORÍA
-    # ========================================================
-
-    category = str(
-        data.get(
-            "category",
-            ""
-        )
-    ).strip()
-
-    if category not in ALLOWED_CATEGORIES:
-
-        return None, (
-            "La categoría no es válida."
-        )
-
-    # ========================================================
-    # DETALLE DE OTROS
-    # ========================================================
-
-    other_detail = str(
-        data.get(
-            "other_detail",
-            data.get(
-                "otherDetail",
-                ""
-            )
-        )
-    ).strip()
-
-    if category == "Otros":
-
-        if not other_detail:
-
-            return None, (
-                "Debes especificar el concepto de 'Otros'."
-            )
-
-        if len(other_detail) > 180:
-
-            return None, (
-                "El detalle de 'Otros' no puede "
-                "superar los 180 caracteres."
-            )
-
-    else:
-
-        other_detail = ""
-
-    # ========================================================
-    # DATOS LIMPIOS
-    # ========================================================
-
-    clean_data = {
-        "type": movement_type,
-        "amount": amount,
-        "description": description,
-        "date": movement_date,
-        "category": category,
-        "other_detail": other_detail
-    }
-
-    return clean_data, None
-
-
-# ============================================================
-# API — CREAR MOVIMIENTO
-# ============================================================
-
-@app.route(
-    "/api/movements",
-    methods=["POST"]
-)
-def create_movement():
-
-    unauthorized = require_admin()
-
-    if unauthorized:
-        return unauthorized
+        limit = 100
 
     try:
+        offset = int(request.args.get("offset", 0))
+    except ValueError:
+        offset = 0
 
-        data = request.get_json(
-            silent=True
-        ) or {}
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
 
-        movement, error = (
-            validate_movement_data(
-                data
-            )
-        )
+    connection = get_db_connection()
 
-        if error:
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
 
-            return api_error(
-                error,
-                400
-            )
+            if include_deleted:
+                auth_error = require_admin()
 
-        created_at = now_iso()
+                if auth_error:
+                    return auth_error
 
-        connection = get_db()
+                cursor.execute("""
+                    SELECT
+                        id,
+                        type,
+                        amount,
+                        description,
+                        date,
+                        category,
+                        other_detail,
+                        deleted_at,
+                        created_at,
+                        updated_at
+                    FROM movements
+                    ORDER BY date DESC, id DESC
+                    LIMIT %s OFFSET %s;
+                """, (
+                    limit,
+                    offset
+                ))
 
-        cursor = connection.cursor()
+            else:
+                cursor.execute("""
+                    SELECT
+                        id,
+                        type,
+                        amount,
+                        description,
+                        date,
+                        category,
+                        other_detail,
+                        deleted_at,
+                        created_at,
+                        updated_at
+                    FROM movements
+                    WHERE deleted_at IS NULL
+                    ORDER BY date DESC, id DESC
+                    LIMIT %s OFFSET %s;
+                """, (
+                    limit,
+                    offset
+                ))
 
-        cursor.execute(
-            """
-            INSERT INTO movements (
-                type,
+            rows = cursor.fetchall()
+
+            cursor.execute("""
+                SELECT COUNT(*) AS total
+                FROM movements
+                WHERE deleted_at IS NULL;
+            """)
+
+            total = cursor.fetchone()["total"]
+
+            return jsonify({
+                "ok": True,
+                "movements": [
+                    movement_to_dict(row)
+                    for row in rows
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset
+            })
+
+    finally:
+        connection.close()
+
+
+# ============================================================
+# OBTENER UN MOVIMIENTO
+# ============================================================
+
+@app.route("/api/movements/<int:movement_id>", methods=["GET"])
+def get_movement(movement_id):
+    connection = get_db_connection()
+
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+            cursor.execute("""
+                SELECT
+                    id,
+                    type,
+                    amount,
+                    description,
+                    date,
+                    category,
+                    other_detail,
+                    deleted_at,
+                    created_at,
+                    updated_at
+                FROM movements
+                WHERE id = %s
+                LIMIT 1;
+            """, (movement_id,))
+
+            row = cursor.fetchone()
+
+            if not row:
+                return jsonify({
+                    "ok": False,
+                    "error": "Movimiento no encontrado."
+                }), 404
+
+            return jsonify({
+                "ok": True,
+                "movement": movement_to_dict(row)
+            })
+
+    finally:
+        connection.close()
+
+
+# ============================================================
+# CREAR MOVIMIENTO
+# ============================================================
+
+@app.route("/api/movements", methods=["POST"])
+def create_movement():
+    auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    data = get_json_data()
+
+    validation_error = validate_movement_data(data)
+
+    if validation_error:
+        return jsonify({
+            "ok": False,
+            "error": validation_error
+        }), 400
+
+    movement_type = str(data["type"]).strip().lower()
+    amount = Decimal(str(data["amount"]))
+    description = str(data["description"]).strip()
+    date_value = str(data["date"]).strip()
+    category = str(data["category"]).strip()
+    other_detail = str(data.get("other_detail", "")).strip()
+
+    if category.lower() != "otros":
+        other_detail = None
+
+    connection = get_db_connection()
+
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+            cursor.execute("""
+                INSERT INTO movements (
+                    type,
+                    amount,
+                    description,
+                    date,
+                    category,
+                    other_detail
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING
+                    id,
+                    type,
+                    amount,
+                    description,
+                    date,
+                    category,
+                    other_detail,
+                    deleted_at,
+                    created_at,
+                    updated_at;
+            """, (
+                movement_type,
                 amount,
                 description,
-                date,
+                date_value,
+                category,
+                other_detail
+            ))
+
+            movement = cursor.fetchone()
+
+            connection.commit()
+
+            return jsonify({
+                "ok": True,
+                "movement": movement_to_dict(movement)
+            }), 201
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+# ============================================================
+# EDITAR MOVIMIENTO
+# ============================================================
+
+@app.route("/api/movements/<int:movement_id>", methods=["PUT"])
+def update_movement(movement_id):
+    auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    data = get_json_data()
+
+    validation_error = validate_movement_data(data)
+
+    if validation_error:
+        return jsonify({
+            "ok": False,
+            "error": validation_error
+        }), 400
+
+    movement_type = str(data["type"]).strip().lower()
+    amount = Decimal(str(data["amount"]))
+    description = str(data["description"]).strip()
+    date_value = str(data["date"]).strip()
+    category = str(data["category"]).strip()
+    other_detail = str(data.get("other_detail", "")).strip()
+
+    if category.lower() != "otros":
+        other_detail = None
+
+    connection = get_db_connection()
+
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+            cursor.execute("""
+                SELECT id
+                FROM movements
+                WHERE id = %s
+                LIMIT 1;
+            """, (movement_id,))
+
+            existing = cursor.fetchone()
+
+            if not existing:
+                return jsonify({
+                    "ok": False,
+                    "error": "Movimiento no encontrado."
+                }), 404
+
+            cursor.execute("""
+                UPDATE movements
+                SET
+                    type = %s,
+                    amount = %s,
+                    description = %s,
+                    date = %s,
+                    category = %s,
+                    other_detail = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING
+                    id,
+                    type,
+                    amount,
+                    description,
+                    date,
+                    category,
+                    other_detail,
+                    deleted_at,
+                    created_at,
+                    updated_at;
+            """, (
+                movement_type,
+                amount,
+                description,
+                date_value,
                 category,
                 other_detail,
-                deleted_at,
-                created_at,
-                updated_at
-            )
-            VALUES (
-                %s,
-                %s,
-                %s,
-                %s,
-                %s,
-                %s,
-                NULL,
-                %s,
-                NULL
-            )
-            RETURNING id
-            """,
-            (
-                movement["type"],
-                movement["amount"],
-                movement["description"],
-                movement["date"],
-                movement["category"],
-                movement["other_detail"],
-                created_at
-            )
-        )
+                movement_id
+            ))
 
-        movement_id = cursor.fetchone()[0]
+            movement = cursor.fetchone()
 
-        connection.commit()
+            connection.commit()
 
-        # Obtener movimiento creado.
+            return jsonify({
+                "ok": True,
+                "movement": movement_to_dict(movement)
+            })
 
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
+    except Exception:
+        connection.rollback()
+        raise
 
-        row = cursor.fetchone()
-
-        created = normalize_movement(
-            row_to_dict(
-                cursor,
-                row
-            )
-        )
-
+    finally:
         connection.close()
 
-        return jsonify({
-            "ok": True,
-            "movement": created
-        }), 201
-
-    except Exception as error:
-
-        print(
-            "ERROR en creación de movimiento:",
-            error
-        )
-
-        return api_error(
-            "Error interno guardando el movimiento.",
-            500
-        )
-
 
 # ============================================================
-# API — EDITAR MOVIMIENTO
+# ELIMINACIÓN LÓGICA
 # ============================================================
 
-@app.route(
-    "/api/movements/<movement_id>",
-    methods=["PUT"]
-)
-def update_movement(
-    movement_id
-):
+@app.route("/api/movements/<int:movement_id>", methods=["DELETE"])
+def delete_movement(movement_id):
+    auth_error = require_admin()
 
-    unauthorized = require_admin()
+    if auth_error:
+        return auth_error
 
-    if unauthorized:
-        return unauthorized
+    connection = get_db_connection()
 
     try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
 
-        try:
+            cursor.execute("""
+                SELECT id, deleted_at
+                FROM movements
+                WHERE id = %s
+                LIMIT 1;
+            """, (movement_id,))
 
-            movement_id = int(
-                movement_id
-            )
+            movement = cursor.fetchone()
 
-        except ValueError:
+            if not movement:
+                return jsonify({
+                    "ok": False,
+                    "error": "Movimiento no encontrado."
+                }), 404
 
-            return api_error(
-                "ID de movimiento inválido.",
-                400
-            )
+            if movement["deleted_at"] is not None:
+                return jsonify({
+                    "ok": False,
+                    "error": "El movimiento ya está eliminado."
+                }), 400
 
-        data = request.get_json(
-            silent=True
-        ) or {}
+            cursor.execute("""
+                UPDATE movements
+                SET
+                    deleted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING
+                    id,
+                    type,
+                    amount,
+                    description,
+                    date,
+                    category,
+                    other_detail,
+                    deleted_at,
+                    created_at,
+                    updated_at;
+            """, (movement_id,))
 
-        movement, error = (
-            validate_movement_data(
-                data
-            )
-        )
+            deleted_movement = cursor.fetchone()
 
-        if error:
+            connection.commit()
 
-            return api_error(
-                error,
-                400
-            )
+            return jsonify({
+                "ok": True,
+                "message": "Movimiento eliminado correctamente.",
+                "movement": movement_to_dict(deleted_movement)
+            })
 
-        connection = get_db()
+    except Exception:
+        connection.rollback()
+        raise
 
-        cursor = connection.cursor()
-
-        # ====================================================
-        # VERIFICAR EXISTENCIA
-        # ====================================================
-
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
-
-        existing_row = cursor.fetchone()
-
-        if not existing_row:
-
-            connection.close()
-
-            return api_error(
-                "Movimiento no encontrado.",
-                404
-            )
-
-        existing = row_to_dict(
-            cursor,
-            existing_row
-        )
-
-        # ====================================================
-        # VERIFICAR QUE ESTÉ ACTIVO
-        # ====================================================
-
-        if existing.get("deleted_at"):
-
-            connection.close()
-
-            return api_error(
-                "No puedes editar un movimiento eliminado.",
-                400
-            )
-
-        # ====================================================
-        # ACTUALIZAR
-        # ====================================================
-
-        cursor.execute(
-            """
-            UPDATE movements
-            SET
-                type = %s,
-                amount = %s,
-                description = %s,
-                date = %s,
-                category = %s,
-                other_detail = %s,
-                updated_at = %s
-            WHERE id = %s
-            """,
-            (
-                movement["type"],
-                movement["amount"],
-                movement["description"],
-                movement["date"],
-                movement["category"],
-                movement["other_detail"],
-                now_iso(),
-                movement_id
-            )
-        )
-
-        connection.commit()
-
-        # Obtener movimiento actualizado.
-
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
-
-        updated_row = cursor.fetchone()
-
-        updated = normalize_movement(
-            row_to_dict(
-                cursor,
-                updated_row
-            )
-        )
-
+    finally:
         connection.close()
 
-        return jsonify({
-            "ok": True,
-            "movement": updated
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR editando movimiento:",
-            error
-        )
-
-        return api_error(
-            "Error interno actualizando el movimiento.",
-            500
-        )
-
 
 # ============================================================
-# API — ELIMINAR MOVIMIENTO
+# HISTORIAL DE MOVIMIENTOS ELIMINADOS
 # ============================================================
 
-@app.route(
-    "/api/movements/<movement_id>",
-    methods=["DELETE"]
-)
-def delete_movement(
-    movement_id
-):
-
-    unauthorized = require_admin()
-
-    if unauthorized:
-        return unauthorized
-
-    try:
-
-        try:
-
-            movement_id = int(
-                movement_id
-            )
-
-        except ValueError:
-
-            return api_error(
-                "ID de movimiento inválido.",
-                400
-            )
-
-        connection = get_db()
-
-        cursor = connection.cursor()
-
-        # ====================================================
-        # VERIFICAR EXISTENCIA
-        # ====================================================
-
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
-
-        existing_row = cursor.fetchone()
-
-        if not existing_row:
-
-            connection.close()
-
-            return api_error(
-                "Movimiento no encontrado.",
-                404
-            )
-
-        existing = row_to_dict(
-            cursor,
-            existing_row
-        )
-
-        # ====================================================
-        # VERIFICAR SI YA ESTÁ ELIMINADO
-        # ====================================================
-
-        if existing.get("deleted_at"):
-
-            connection.close()
-
-            return api_error(
-                "El movimiento ya fue eliminado.",
-                400
-            )
-
-        # ====================================================
-        # ELIMINACIÓN LÓGICA
-        # ====================================================
-
-        deleted_at = now_iso()
-
-        cursor.execute(
-            """
-            UPDATE movements
-            SET
-                deleted_at = %s,
-                updated_at = %s
-            WHERE id = %s
-            """,
-            (
-                deleted_at,
-                deleted_at,
-                movement_id
-            )
-        )
-
-        connection.commit()
-
-        # Obtener movimiento eliminado.
-
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
-
-        deleted_row = cursor.fetchone()
-
-        deleted = normalize_movement(
-            row_to_dict(
-                cursor,
-                deleted_row
-            )
-        )
-
-        connection.close()
-
-        return jsonify({
-            "ok": True,
-            "movement": deleted
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR eliminando movimiento:",
-            error
-        )
-
-        return api_error(
-            "Error interno eliminando el movimiento.",
-            500
-        )
-
-
-# ============================================================
-# API — ELIMINAR MOVIMIENTO PERMANENTEMENTE
-# ============================================================
-
-@app.route(
-    "/api/movements/<movement_id>/permanent",
-    methods=["DELETE"]
-)
-def permanently_delete_movement(
-    movement_id
-):
-
-    unauthorized = require_admin()
-
-    if unauthorized:
-        return unauthorized
-
-    connection = None
-
-    try:
-
-        try:
-
-            movement_id = int(
-                movement_id
-            )
-
-        except ValueError:
-
-            return api_error(
-                "ID de movimiento inválido.",
-                400
-            )
-
-        connection = get_db()
-
-        cursor = connection.cursor()
-
-        # ====================================================
-        # VERIFICAR EXISTENCIA
-        # ====================================================
-
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
-
-        existing_row = cursor.fetchone()
-
-        if not existing_row:
-
-            connection.close()
-
-            return api_error(
-                "Movimiento no encontrado.",
-                404
-            )
-
-        existing = row_to_dict(
-            cursor,
-            existing_row
-        )
-
-        # ====================================================
-        # SOLO SE PUEDE BORRAR PERMANENTEMENTE
-        # UN MOVIMIENTO YA ELIMINADO
-        # ====================================================
-
-        if not existing.get("deleted_at"):
-
-            connection.close()
-
-            return api_error(
-                "El movimiento debe estar eliminado antes de poder borrarlo permanentemente.",
-                400
-            )
-
-        # ====================================================
-        # ELIMINACIÓN FÍSICA
-        # ====================================================
-
-        cursor.execute(
-            """
-            DELETE FROM movements
-            WHERE id = %s
-            """,
-            (movement_id,)
-        )
-
-        if cursor.rowcount != 1:
-
-            connection.rollback()
-            connection.close()
-
-            return api_error(
-                "No se pudo eliminar permanentemente el movimiento.",
-                500
-            )
-
-        connection.commit()
-
-        connection.close()
-
-        # ====================================================
-        # RESPUESTA
-        # ====================================================
-
-        return jsonify({
-            "ok": True,
-            "message": "El movimiento fue eliminado permanentemente.",
-            "movement_id": movement_id
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR eliminando permanentemente movimiento:",
-            error
-        )
-
-        if connection:
-
-            try:
-                connection.rollback()
-                connection.close()
-            except Exception:
-                pass
-
-        return api_error(
-            "Error interno eliminando permanentemente el movimiento.",
-            500
-        )
-
-
-# ============================================================
-# API — HISTORIAL ADMINISTRATIVO
-# ============================================================
-
-@app.route(
-    "/api/admin/history",
-    methods=["GET"]
-)
+@app.route("/api/admin/history", methods=["GET"])
 def admin_history():
+    auth_error = require_admin()
 
-    unauthorized = require_admin()
+    if auth_error:
+        return auth_error
 
-    if unauthorized:
-        return unauthorized
+    connection = get_db_connection()
 
     try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
 
-        connection = get_db()
+            cursor.execute("""
+                SELECT
+                    id,
+                    type,
+                    amount,
+                    description,
+                    date,
+                    category,
+                    other_detail,
+                    deleted_at,
+                    created_at,
+                    updated_at
+                FROM movements
+                WHERE deleted_at IS NOT NULL
+                ORDER BY deleted_at DESC, id DESC;
+            """)
 
-        cursor = connection.cursor()
+            rows = cursor.fetchall()
 
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE deleted_at IS NOT NULL
-            ORDER BY deleted_at DESC, id DESC
-            LIMIT 500
-            """
-        )
+            return jsonify({
+                "ok": True,
+                "movements": [
+                    movement_to_dict(row)
+                    for row in rows
+                ],
+                "total": len(rows)
+            })
 
-        rows = cursor.fetchall()
-
-        movements = [
-            normalize_movement(
-                row_to_dict(
-                    cursor,
-                    row
-                )
-            )
-            for row in rows
-        ]
-
+    finally:
         connection.close()
-
-        return jsonify({
-            "ok": True,
-            "movements": movements,
-            "history": movements,
-            "deleted_movements": movements
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR en historial administrativo:",
-            error
-        )
-
-        return api_error(
-            "Error interno cargando el historial administrativo.",
-            500
-        )
 
 
 # ============================================================
-# API — RESTAURAR MOVIMIENTO
+# RESTAURAR MOVIMIENTO
+# ============================================================
+
+@app.route("/api/movements/<int:movement_id>/restore", methods=["POST"])
+def restore_movement(movement_id):
+    auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    connection = get_db_connection()
+
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+            cursor.execute("""
+                SELECT id, deleted_at
+                FROM movements
+                WHERE id = %s
+                LIMIT 1;
+            """, (movement_id,))
+
+            movement = cursor.fetchone()
+
+            if not movement:
+                return jsonify({
+                    "ok": False,
+                    "error": "Movimiento no encontrado."
+                }), 404
+
+            if movement["deleted_at"] is None:
+                return jsonify({
+                    "ok": False,
+                    "error": "El movimiento ya está activo."
+                }), 400
+
+            cursor.execute("""
+                UPDATE movements
+                SET
+                    deleted_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING
+                    id,
+                    type,
+                    amount,
+                    description,
+                    date,
+                    category,
+                    other_detail,
+                    deleted_at,
+                    created_at,
+                    updated_at;
+            """, (movement_id,))
+
+            restored_movement = cursor.fetchone()
+
+            connection.commit()
+
+            return jsonify({
+                "ok": True,
+                "message": "Movimiento restaurado correctamente.",
+                "movement": movement_to_dict(restored_movement)
+            })
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+# ============================================================
+# ELIMINACIÓN PERMANENTE
 # ============================================================
 
 @app.route(
-    "/api/movements/<movement_id>/restore",
-    methods=["POST"]
+    "/api/movements/<int:movement_id>/permanent",
+    methods=["DELETE"]
 )
-def restore_movement(
-    movement_id
-):
+def permanent_delete_movement(movement_id):
+    auth_error = require_admin()
 
-    unauthorized = require_admin()
+    if auth_error:
+        return auth_error
 
-    if unauthorized:
-        return unauthorized
+    connection = get_db_connection()
 
     try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
 
-        try:
+            cursor.execute("""
+                SELECT
+                    id,
+                    deleted_at
+                FROM movements
+                WHERE id = %s
+                LIMIT 1;
+            """, (movement_id,))
 
-            movement_id = int(
-                movement_id
-            )
+            movement = cursor.fetchone()
 
-        except ValueError:
+            if not movement:
+                return jsonify({
+                    "ok": False,
+                    "error": "Movimiento no encontrado."
+                }), 404
 
-            return api_error(
-                "ID de movimiento inválido.",
-                400
-            )
+            # Solo se puede eliminar permanentemente algo
+            # que ya fue enviado a la papelera.
+            if movement["deleted_at"] is None:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Primero debes eliminar lógicamente "
+                        "el movimiento."
+                    )
+                }), 400
 
-        connection = get_db()
+            cursor.execute("""
+                DELETE FROM movements
+                WHERE id = %s
+                RETURNING id;
+            """, (movement_id,))
 
-        cursor = connection.cursor()
+            deleted = cursor.fetchone()
 
-        # ====================================================
-        # VERIFICAR MOVIMIENTO
-        # ====================================================
+            connection.commit()
 
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
+            return jsonify({
+                "ok": True,
+                "message": "Movimiento eliminado permanentemente.",
+                "id": deleted["id"]
+            })
 
-        existing_row = cursor.fetchone()
+    except Exception:
+        connection.rollback()
+        raise
 
-        if not existing_row:
-
-            connection.close()
-
-            return api_error(
-                "Movimiento no encontrado.",
-                404
-            )
-
-        existing = row_to_dict(
-            cursor,
-            existing_row
-        )
-
-        # ====================================================
-        # VERIFICAR QUE ESTÉ ELIMINADO
-        # ====================================================
-
-        if not existing.get("deleted_at"):
-
-            connection.close()
-
-            return api_error(
-                "Este movimiento no está eliminado.",
-                400
-            )
-
-        # ====================================================
-        # RESTAURAR
-        # ====================================================
-
-        cursor.execute(
-            """
-            UPDATE movements
-            SET
-                deleted_at = NULL,
-                updated_at = %s
-            WHERE id = %s
-            """,
-            (
-                now_iso(),
-                movement_id
-            )
-        )
-
-        connection.commit()
-
-        # Obtener movimiento restaurado.
-
-        cursor.execute(
-            """
-            SELECT *
-            FROM movements
-            WHERE id = %s
-            LIMIT 1
-            """,
-            (movement_id,)
-        )
-
-        restored_row = cursor.fetchone()
-
-        restored = normalize_movement(
-            row_to_dict(
-                cursor,
-                restored_row
-            )
-        )
-
+    finally:
         connection.close()
 
-        return jsonify({
-            "ok": True,
-            "movement": restored
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR restaurando movimiento:",
-            error
-        )
-
-        return api_error(
-            "Error interno restaurando el movimiento.",
-            500
-        )
-
 
 # ============================================================
-# API — RESUMEN FINANCIERO
+# RESUMEN / BALANCE
 # ============================================================
 
-@app.route(
-    "/api/summary",
-    methods=["GET"]
-)
+@app.route("/api/summary", methods=["GET"])
 def summary():
+    connection = get_db_connection()
 
     try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
 
-        connection = get_db()
+            cursor.execute("""
+                SELECT
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN type = 'income'
+                                THEN amount
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS income,
 
-        cursor = connection.cursor()
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN type = 'expense'
+                                THEN amount
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS expenses,
 
-        # ====================================================
-        # INGRESOS
-        # ====================================================
+                    COUNT(*) AS total_movements
 
-        cursor.execute(
-            """
-            SELECT COALESCE(
-                SUM(amount),
-                0
-            )
-            FROM movements
-            WHERE
-                type = 'ingreso'
-                AND deleted_at IS NULL
-            """
-        )
+                FROM movements
+                WHERE deleted_at IS NULL;
+            """)
 
-        ingresos = Decimal(
-            str(
-                cursor.fetchone()[0]
-            )
-        )
+            result = cursor.fetchone()
 
-        # ====================================================
-        # GASTOS
-        # ====================================================
+            income = Decimal(result["income"] or 0)
+            expenses = Decimal(result["expenses"] or 0)
+            balance = income - expenses
 
-        cursor.execute(
-            """
-            SELECT COALESCE(
-                SUM(amount),
-                0
-            )
-            FROM movements
-            WHERE
-                type = 'gasto'
-                AND deleted_at IS NULL
-            """
-        )
+            return jsonify({
+                "ok": True,
+                "income": float(income),
+                "expenses": float(expenses),
+                "balance": float(balance),
+                "total_movements": result["total_movements"]
+            })
 
-        gastos = Decimal(
-            str(
-                cursor.fetchone()[0]
-            )
-        )
-
+    finally:
         connection.close()
-
-        # ====================================================
-        # SALDO
-        # ====================================================
-
-        saldo = ingresos - gastos
-
-        return jsonify({
-            "ok": True,
-            "ingresos": float(ingresos),
-            "gastos": float(gastos),
-            "saldo": float(saldo)
-        })
-
-    except Exception as error:
-
-        print(
-            "ERROR calculando resumen:",
-            error
-        )
-
-        return api_error(
-            "Error interno calculando el resumen.",
-            500
-        )
 
 
 # ============================================================
-# MANEJADOR DE ERRORES 404
+# MANEJO DE ERRORES
 # ============================================================
 
 @app.errorhandler(404)
 def not_found(error):
-
     if request.path.startswith("/api/"):
-
         return jsonify({
             "ok": False,
-            "error": "Endpoint no encontrado."
+            "error": "Recurso no encontrado."
         }), 404
 
-    return error
+    return render_template("index.html"), 404
 
-
-# ============================================================
-# MANEJADOR DE ERRORES 500
-# ============================================================
 
 @app.errorhandler(500)
 def internal_error(error):
-
     if request.path.startswith("/api/"):
-
         return jsonify({
             "ok": False,
             "error": "Error interno del servidor."
         }), 500
 
-    return error
+    return "Error interno del servidor.", 500
 
 
 # ============================================================
-# EJECUTAR
+# INICIALIZACIÓN
 # ============================================================
 
 if __name__ == "__main__":
-
     try:
-        init_db()
-
+        init_database()
+        print("Base de datos conectada correctamente.")
     except Exception as error:
+        print("Error conectando con la base de datos:")
+        print(error)
 
-        print(
-            "ERROR inicializando base de datos:",
-            error
-        )
-
-    print()
-    print("==============================================")
-    print(" TESORERÍA — IGLESIA CATÓLICA LOS ARRAYANES")
-    print("==============================================")
-    print("Base de datos: Supabase PostgreSQL")
-    print("Usuario administrador:", ADMIN_USERNAME)
-    print("==============================================")
-    print()
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            "5000"
-        )
-    )
+    port = int(os.environ.get("PORT", 5000))
 
     app.run(
         host="0.0.0.0",
