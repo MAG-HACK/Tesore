@@ -1,11 +1,10 @@
-
 from flask import Flask, render_template, request, jsonify, session
-
 import os
-import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from werkzeug.security import check_password_hash, generate_password_hash
+import psycopg2
+import psycopg2.extras
 
 
 # ============================================================
@@ -21,25 +20,21 @@ app.secret_key = os.environ.get(
 
 app.permanent_session_lifetime = 60 * 60 * 24 * 7
 
-# Cookies de sesión
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
-# En Render se utiliza HTTPS.
 if os.environ.get("RENDER"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
 
 # ============================================================
-# BASE DE DATOS SQLITE
+# SUPABASE / POSTGRESQL
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-DB_PATH = os.environ.get(
-    "DATABASE_PATH",
-    os.path.join(BASE_DIR, "tesoreria.db")
-)
+if not DATABASE_URL:
+    print("ADVERTENCIA: DATABASE_URL no está configurada.")
 
 
 # ============================================================
@@ -88,22 +83,23 @@ def now_iso():
 
 
 # ============================================================
-# CONEXIÓN SQLITE
+# CONEXIÓN A SUPABASE
 # ============================================================
 
 def get_db():
     """
-    Abre una conexión a SQLite.
+    Abre una conexión PostgreSQL utilizando DATABASE_URL.
     """
-    connection = sqlite3.connect(
-        DB_PATH,
-        timeout=30
+
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL no está configurada."
+        )
+
+    connection = psycopg2.connect(
+        DATABASE_URL,
+        connect_timeout=10
     )
-
-    connection.row_factory = sqlite3.Row
-
-    # Permite claves foráneas.
-    connection.execute("PRAGMA foreign_keys = ON")
 
     return connection
 
@@ -114,7 +110,7 @@ def get_db():
 
 def init_db():
     """
-    Crea las tablas necesarias si todavía no existen.
+    Crea las tablas necesarias en Supabase si todavía no existen.
     """
 
     connection = get_db()
@@ -129,16 +125,16 @@ def init_db():
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS movements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 type TEXT NOT NULL,
-                amount REAL NOT NULL,
+                amount NUMERIC(12, 2) NOT NULL,
                 description TEXT NOT NULL,
-                date TEXT NOT NULL,
+                date DATE NOT NULL,
                 category TEXT NOT NULL,
                 other_detail TEXT DEFAULT '',
-                deleted_at TEXT DEFAULT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT DEFAULT NULL
+                deleted_at TIMESTAMPTZ DEFAULT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT NULL
             )
             """
         )
@@ -150,11 +146,11 @@ def init_db():
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS admin (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
                 password TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT DEFAULT NULL
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT NULL
             )
             """
         )
@@ -167,7 +163,7 @@ def init_db():
             """
             SELECT id
             FROM admin
-            WHERE username = ?
+            WHERE username = %s
             LIMIT 1
             """,
             (ADMIN_USERNAME,)
@@ -187,7 +183,7 @@ def init_db():
                     password,
                     created_at
                 )
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
                 """,
                 (
                     ADMIN_USERNAME,
@@ -197,7 +193,7 @@ def init_db():
             )
 
             print(
-                "Administrador SQLite creado:",
+                "Administrador Supabase creado:",
                 ADMIN_USERNAME
             )
 
@@ -208,14 +204,21 @@ def init_db():
 
 
 # ============================================================
-# CONVERTIR ROW SQLITE A DICCIONARIO
+# CONVERTIR ROW A DICCIONARIO
 # ============================================================
 
-def row_to_dict(row):
+def row_to_dict(cursor, row):
     if row is None:
         return None
 
-    return dict(row)
+    columns = [
+        description[0]
+        for description in cursor.description
+    ]
+
+    return dict(
+        zip(columns, row)
+    )
 
 
 # ============================================================
@@ -283,19 +286,50 @@ def normalize_movement(movement):
 
     result = dict(movement)
 
-    # Convertir monto a float.
+    # ========================================================
+    # CONVERTIR MONTO
+    # ========================================================
+
     if "amount" in result:
         try:
             result["amount"] = float(
                 result["amount"]
             )
+
         except (
             ValueError,
             TypeError
         ):
             pass
 
-    # Compatibilidad con nombres alternativos.
+    # ========================================================
+    # CONVERTIR FECHA POSTGRESQL
+    # ========================================================
+
+    if "date" in result:
+        if hasattr(result["date"], "isoformat"):
+            result["date"] = result["date"].isoformat()
+
+    # ========================================================
+    # CONVERTIR FECHAS TIMESTAMP
+    # ========================================================
+
+    for field in [
+        "deleted_at",
+        "created_at",
+        "updated_at"
+    ]:
+
+        if field in result:
+            if hasattr(
+                result[field],
+                "isoformat"
+            ):
+                result[field] = result[field].isoformat()
+
+    # ========================================================
+    # COMPATIBILIDAD CON NOMBRES ALTERNATIVOS
+    # ========================================================
 
     if "other_detail" not in result:
         if "otherDetail" in result:
@@ -331,7 +365,7 @@ def load_admin():
             """
             SELECT *
             FROM admin
-            WHERE username = ?
+            WHERE username = %s
             LIMIT 1
             """,
             (ADMIN_USERNAME,)
@@ -339,7 +373,10 @@ def load_admin():
 
         row = cursor.fetchone()
 
-        return row_to_dict(row)
+        return row_to_dict(
+            cursor,
+            row
+        )
 
     except Exception as error:
 
@@ -392,6 +429,7 @@ def verify_password(
     ):
 
         try:
+
             return check_password_hash(
                 stored_password,
                 entered_password
@@ -441,9 +479,9 @@ def save_admin_password(
             """
             UPDATE admin
             SET
-                password = ?,
-                updated_at = ?
-            WHERE id = ?
+                password = %s,
+                updated_at = %s
+            WHERE id = %s
             """,
             (
                 password_hash,
@@ -466,6 +504,7 @@ def save_admin_password(
         return False
 
     finally:
+
         connection.close()
 
 
@@ -491,6 +530,7 @@ def health():
     try:
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         cursor.execute(
@@ -502,15 +542,14 @@ def health():
 
         result = cursor.fetchone()
 
-        total = result["total"]
+        total = result[0]
 
         connection.close()
 
         return jsonify({
             "status": "ok",
             "database": True,
-            "database_type": "sqlite",
-            "database_path": DB_PATH,
+            "database_type": "supabase_postgresql",
             "movements": total
         })
 
@@ -524,7 +563,7 @@ def health():
         return jsonify({
             "status": "error",
             "database": False,
-            "database_type": "sqlite",
+            "database_type": "supabase_postgresql",
             "message": str(error)
         }), 500
 
@@ -679,7 +718,7 @@ def auth_logout():
 
 
 # ============================================================
-# CONSTRUIR FILTROS SQLITE
+# CONSTRUIR FILTROS POSTGRESQL
 # ============================================================
 
 def build_movement_filters(
@@ -731,9 +770,9 @@ def build_movement_filters(
         conditions.append(
             """
             (
-                description LIKE ?
-                OR other_detail LIKE ?
-                OR category LIKE ?
+                description ILIKE %s
+                OR other_detail ILIKE %s
+                OR category ILIKE %s
             )
             """
         )
@@ -760,7 +799,7 @@ def build_movement_filters(
     if date_from:
 
         conditions.append(
-            "date >= ?"
+            "date >= %s"
         )
 
         parameters.append(
@@ -781,7 +820,7 @@ def build_movement_filters(
     if date_to:
 
         conditions.append(
-            "date <= ?"
+            "date <= %s"
         )
 
         parameters.append(
@@ -802,7 +841,7 @@ def build_movement_filters(
     if movement_type in ALLOWED_TYPES:
 
         conditions.append(
-            "type = ?"
+            "type = %s"
         )
 
         parameters.append(
@@ -823,12 +862,16 @@ def build_movement_filters(
     if category in ALLOWED_CATEGORIES:
 
         conditions.append(
-            "category = ?"
+            "category = %s"
         )
 
         parameters.append(
             category
         )
+
+    # ========================================================
+    # WHERE
+    # ========================================================
 
     where_sql = ""
 
@@ -907,8 +950,6 @@ def get_movements():
 
             offset = 0
 
-        # Límites de seguridad.
-
         limit = max(
             1,
             min(
@@ -933,6 +974,7 @@ def get_movements():
         )
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         # ====================================================
@@ -948,7 +990,7 @@ def get_movements():
             parameters
         )
 
-        total = cursor.fetchone()["total"]
+        total = cursor.fetchone()[0]
 
         # ====================================================
         # MOVIMIENTOS
@@ -960,7 +1002,7 @@ def get_movements():
             FROM movements
             {where_sql}
             ORDER BY date DESC, id DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
             """,
             parameters + [
                 limit,
@@ -970,14 +1012,17 @@ def get_movements():
 
         rows = cursor.fetchall()
 
-        connection.close()
-
         movements = [
             normalize_movement(
-                row_to_dict(row)
+                row_to_dict(
+                    cursor,
+                    row
+                )
             )
             for row in rows
         ]
+
+        connection.close()
 
         return jsonify({
             "ok": True,
@@ -1028,13 +1073,14 @@ def get_movement(
             )
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         cursor.execute(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1042,9 +1088,9 @@ def get_movement(
 
         row = cursor.fetchone()
 
-        connection.close()
-
         if not row:
+
+            connection.close()
 
             return api_error(
                 "Movimiento no encontrado.",
@@ -1052,8 +1098,13 @@ def get_movement(
             )
 
         movement = normalize_movement(
-            row_to_dict(row)
+            row_to_dict(
+                cursor,
+                row
+            )
         )
+
+        connection.close()
 
         return jsonify({
             "ok": True,
@@ -1079,7 +1130,10 @@ def get_movement(
 
 def validate_movement_data(data):
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict
+    ):
 
         return None, "Datos inválidos."
 
@@ -1155,8 +1209,6 @@ def validate_movement_data(data):
             "La fecha es obligatoria."
         )
 
-    # Validar YYYY-MM-DD.
-
     try:
 
         datetime.strptime(
@@ -1226,7 +1278,7 @@ def validate_movement_data(data):
 
     clean_data = {
         "type": movement_type,
-        "amount": float(amount),
+        "amount": amount,
         "description": description,
         "date": movement_date,
         "category": category,
@@ -1273,6 +1325,7 @@ def create_movement():
         created_at = now_iso()
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         cursor.execute(
@@ -1288,7 +1341,18 @@ def create_movement():
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                NULL,
+                %s,
+                NULL
+            )
+            RETURNING id
             """,
             (
                 movement["type"],
@@ -1301,7 +1365,7 @@ def create_movement():
             )
         )
 
-        movement_id = cursor.lastrowid
+        movement_id = cursor.fetchone()[0]
 
         connection.commit()
 
@@ -1311,7 +1375,7 @@ def create_movement():
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1319,11 +1383,14 @@ def create_movement():
 
         row = cursor.fetchone()
 
-        connection.close()
-
         created = normalize_movement(
-            row_to_dict(row)
+            row_to_dict(
+                cursor,
+                row
+            )
         )
+
+        connection.close()
 
         return jsonify({
             "ok": True,
@@ -1392,18 +1459,19 @@ def update_movement(
                 400
             )
 
+        connection = get_db()
+
+        cursor = connection.cursor()
+
         # ====================================================
         # VERIFICAR EXISTENCIA
         # ====================================================
-
-        connection = get_db()
-        cursor = connection.cursor()
 
         cursor.execute(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1421,6 +1489,7 @@ def update_movement(
             )
 
         existing = row_to_dict(
+            cursor,
             existing_row
         )
 
@@ -1445,14 +1514,14 @@ def update_movement(
             """
             UPDATE movements
             SET
-                type = ?,
-                amount = ?,
-                description = ?,
-                date = ?,
-                category = ?,
-                other_detail = ?,
-                updated_at = ?
-            WHERE id = ?
+                type = %s,
+                amount = %s,
+                description = %s,
+                date = %s,
+                category = %s,
+                other_detail = %s,
+                updated_at = %s
+            WHERE id = %s
             """,
             (
                 movement["type"],
@@ -1474,7 +1543,7 @@ def update_movement(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1482,11 +1551,14 @@ def update_movement(
 
         updated_row = cursor.fetchone()
 
-        connection.close()
-
         updated = normalize_movement(
-            row_to_dict(updated_row)
+            row_to_dict(
+                cursor,
+                updated_row
+            )
         )
+
+        connection.close()
 
         return jsonify({
             "ok": True,
@@ -1508,21 +1580,6 @@ def update_movement(
 
 # ============================================================
 # API — ELIMINAR MOVIMIENTO
-# ============================================================
-#
-# IMPORTANTE:
-#
-# NO se borra físicamente de SQLite.
-#
-# Solamente se coloca deleted_at.
-#
-# De esta manera:
-#
-# - desaparece de los movimientos activos
-# - deja de afectar el saldo
-# - permanece en historial administrativo
-# - puede restaurarse posteriormente
-#
 # ============================================================
 
 @app.route(
@@ -1554,6 +1611,7 @@ def delete_movement(
             )
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         # ====================================================
@@ -1564,7 +1622,7 @@ def delete_movement(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1582,6 +1640,7 @@ def delete_movement(
             )
 
         existing = row_to_dict(
+            cursor,
             existing_row
         )
 
@@ -1608,9 +1667,9 @@ def delete_movement(
             """
             UPDATE movements
             SET
-                deleted_at = ?,
-                updated_at = ?
-            WHERE id = ?
+                deleted_at = %s,
+                updated_at = %s
+            WHERE id = %s
             """,
             (
                 deleted_at,
@@ -1627,7 +1686,7 @@ def delete_movement(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1635,11 +1694,14 @@ def delete_movement(
 
         deleted_row = cursor.fetchone()
 
-        connection.close()
-
         deleted = normalize_movement(
-            row_to_dict(deleted_row)
+            row_to_dict(
+                cursor,
+                deleted_row
+            )
         )
+
+        connection.close()
 
         return jsonify({
             "ok": True,
@@ -1662,22 +1724,6 @@ def delete_movement(
 # ============================================================
 # API — ELIMINAR MOVIMIENTO PERMANENTEMENTE
 # ============================================================
-#
-# ESTA ES LA RUTA NUEVA.
-#
-# Solo un administrador puede utilizarla.
-#
-# Solo permite eliminar físicamente movimientos que ya
-# estén eliminados mediante deleted_at.
-#
-# Una vez ejecutado:
-#
-# DELETE FROM movements
-#
-# el movimiento desaparece definitivamente de SQLite y
-# NO puede ser restaurado.
-#
-# ============================================================
 
 @app.route(
     "/api/movements/<movement_id>/permanent",
@@ -1691,6 +1737,8 @@ def permanently_delete_movement(
 
     if unauthorized:
         return unauthorized
+
+    connection = None
 
     try:
 
@@ -1708,6 +1756,7 @@ def permanently_delete_movement(
             )
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         # ====================================================
@@ -1718,7 +1767,7 @@ def permanently_delete_movement(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1736,12 +1785,13 @@ def permanently_delete_movement(
             )
 
         existing = row_to_dict(
+            cursor,
             existing_row
         )
 
         # ====================================================
         # SOLO SE PUEDE BORRAR PERMANENTEMENTE
-        # UN MOVIMIENTO QUE YA ESTÉ ELIMINADO
+        # UN MOVIMIENTO YA ELIMINADO
         # ====================================================
 
         if not existing.get("deleted_at"):
@@ -1760,12 +1810,10 @@ def permanently_delete_movement(
         cursor.execute(
             """
             DELETE FROM movements
-            WHERE id = ?
+            WHERE id = %s
             """,
             (movement_id,)
         )
-
-        # Verificar que realmente se haya eliminado.
 
         if cursor.rowcount != 1:
 
@@ -1798,11 +1846,13 @@ def permanently_delete_movement(
             error
         )
 
-        try:
-            connection.rollback()
-            connection.close()
-        except Exception:
-            pass
+        if connection:
+
+            try:
+                connection.rollback()
+                connection.close()
+            except Exception:
+                pass
 
         return api_error(
             "Error interno eliminando permanentemente el movimiento.",
@@ -1828,6 +1878,7 @@ def admin_history():
     try:
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         cursor.execute(
@@ -1842,14 +1893,17 @@ def admin_history():
 
         rows = cursor.fetchall()
 
-        connection.close()
-
         movements = [
             normalize_movement(
-                row_to_dict(row)
+                row_to_dict(
+                    cursor,
+                    row
+                )
             )
             for row in rows
         ]
+
+        connection.close()
 
         return jsonify({
             "ok": True,
@@ -1904,6 +1958,7 @@ def restore_movement(
             )
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         # ====================================================
@@ -1914,7 +1969,7 @@ def restore_movement(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1932,6 +1987,7 @@ def restore_movement(
             )
 
         existing = row_to_dict(
+            cursor,
             existing_row
         )
 
@@ -1957,8 +2013,8 @@ def restore_movement(
             UPDATE movements
             SET
                 deleted_at = NULL,
-                updated_at = ?
-            WHERE id = ?
+                updated_at = %s
+            WHERE id = %s
             """,
             (
                 now_iso(),
@@ -1974,7 +2030,7 @@ def restore_movement(
             """
             SELECT *
             FROM movements
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
             """,
             (movement_id,)
@@ -1982,11 +2038,14 @@ def restore_movement(
 
         restored_row = cursor.fetchone()
 
-        connection.close()
-
         restored = normalize_movement(
-            row_to_dict(restored_row)
+            row_to_dict(
+                cursor,
+                restored_row
+            )
         )
+
+        connection.close()
 
         return jsonify({
             "ok": True,
@@ -2019,6 +2078,7 @@ def summary():
     try:
 
         connection = get_db()
+
         cursor = connection.cursor()
 
         # ====================================================
@@ -2030,7 +2090,7 @@ def summary():
             SELECT COALESCE(
                 SUM(amount),
                 0
-            ) AS total
+            )
             FROM movements
             WHERE
                 type = 'ingreso'
@@ -2040,7 +2100,7 @@ def summary():
 
         ingresos = Decimal(
             str(
-                cursor.fetchone()["total"]
+                cursor.fetchone()[0]
             )
         )
 
@@ -2053,7 +2113,7 @@ def summary():
             SELECT COALESCE(
                 SUM(amount),
                 0
-            ) AS total
+            )
             FROM movements
             WHERE
                 type = 'gasto'
@@ -2063,7 +2123,7 @@ def summary():
 
         gastos = Decimal(
             str(
-                cursor.fetchone()["total"]
+                cursor.fetchone()[0]
             )
         )
 
@@ -2096,7 +2156,7 @@ def summary():
 
 
 # ============================================================
-# MANEJADOR DE ERRORES 404 PARA API
+# MANEJADOR DE ERRORES 404
 # ============================================================
 
 @app.errorhandler(404)
@@ -2135,29 +2195,22 @@ def internal_error(error):
 
 if __name__ == "__main__":
 
-    # Crear base de datos automáticamente.
-    init_db()
+    try:
+        init_db()
+
+    except Exception as error:
+
+        print(
+            "ERROR inicializando base de datos:",
+            error
+        )
 
     print()
     print("==============================================")
     print(" TESORERÍA — IGLESIA CATÓLICA LOS ARRAYANES")
     print("==============================================")
-
-    print(
-        "Base de datos:",
-        "SQLite"
-    )
-
-    print(
-        "Archivo:",
-        DB_PATH
-    )
-
-    print(
-        "Usuario administrador:",
-        ADMIN_USERNAME
-    )
-
+    print("Base de datos: Supabase PostgreSQL")
+    print("Usuario administrador:", ADMIN_USERNAME)
     print("==============================================")
     print()
 
